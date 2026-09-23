@@ -22,22 +22,6 @@
 // Electron's own loader — esbuild cannot usefully bundle it (it isn't a
 // normal npm package; Electron intercepts the `require`).
 //
-// `"node-gyp"` is ALSO external, for a narrower reason: `pacote` (added for
-// `claude-runtime-installer.ts` — see that file's doc comment) depends on
-// `@npmcli/run-script`, which calls `require.resolve("node-gyp/bin/
-// node-gyp.js")` to support running a package's `install`/`prepare`
-// lifecycle scripts. esbuild cannot statically resolve that (the specifier
-// isn't a literal it can prove reachable) and emits a build WARNING, which
-// this script treats as a hard failure below — correctly, in general
-// (a silently-swallowed warning is how real defects hide), but this
-// SPECIFIC one is unreachable code in our usage: `claude-runtime-installer.ts`
-// only ever calls `pacote.extract()` on a REGISTRY spec (a `.tgz` fetch),
-// and pacote's own docs are explicit that lifecycle scripts run ONLY for
-// git/directory package sources, never registry ones. Marking the package
-// external is the correct fix, not a suppression of a real problem: it
-// leaves the (never-executed) `require.resolve` as a plain runtime call
-// instead of asking esbuild to prove something about it statically that
-// isn't provable, and it also keeps `node-gyp` itself out of the bundle.
 import { build } from "esbuild"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -57,7 +41,7 @@ const result = await build({
   // Electron 35+ ships Node 22.14 — matches engines.node (>=22.12) and the
   // payload's own floor (editor-cli/package.json).
   target: "node22",
-  external: ["electron", "node-gyp"],
+  external: ["electron"],
   sourcemap: true,
   metafile: true,
   logLevel: "info",

@@ -187,10 +187,12 @@ function OverwriteWarningBanner({
 }
 
 /**
- * Claude's own usage limit, on the account whose credentials this editor is
- * using — a subscription or an API key. It is not a limit the editor imposes,
- * and the copy says whose it is, because "rate limit" alone leaves the reader
- * wondering which of the two things in front of them ran out.
+ * The provider's own usage limit, on the account whose credentials this
+ * editor is using — a subscription or an API key. It is not a limit the
+ * editor imposes, and the copy says whose it is, because "rate limit" alone
+ * leaves the reader wondering which of the two things in front of them ran
+ * out. `providerLabel` (the active provider's descriptor `label`, e.g.
+ * "Anthropic" or "OpenAI") is what makes "whose" correct instead of assumed.
  *
  * Rewritten 2026-08-18 (Mo). What it used to say:
  *
@@ -208,13 +210,34 @@ function OverwriteWarningBanner({
  * the limit or past it, when it clears, and whether the turn is still going.
  * The percentage stays only in the approaching case, where it is the
  * difference between "finish this thought" and "stop now".
+ *
+ * Made provider-neutral 2026-09-22 (fix round 1 on the rate-limit-events
+ * task). The neutral loop started raising this same event kind off a bare
+ * 429, so a session on any provider can reach this banner now, not only an
+ * Anthropic one. Two things changed: the account name is `providerLabel`,
+ * not a hard-coded "Claude", and the overage-credit sentence only appears
+ * when the event actually carries an Anthropic-specific field
+ * (`rateLimitType` or `overageStatus`) — see `hasAnthropicVendorFields`
+ * below. Rendering "no extra credits available" over an OpenAI session
+ * would describe a credit pool that provider does not have.
  */
 function RateLimitWarningBanner({
   message,
+  providerLabel,
 }: {
   message: Extract<ChatMessage, { kind: "rate_limit_warning" }>
+  providerLabel: string
 }) {
   const isRejected = message.status === "rejected"
+  // `rateLimitType` and `overageStatus` are the Claude Agent SDK lane's own
+  // structured telemetry — a neutral-lane event (raised off a bare 429, see
+  // `streamStepWithRetry` in `run-chat-turn-neutral.ts`) never carries
+  // either. Everything below that speaks about tiers or an overage credit
+  // pool is gated on this, so an OpenAI (or any non-Anthropic) 429 gets the
+  // plain "usage limit reached" sentence and nothing this account does not
+  // actually have.
+  const hasAnthropicVendorFields =
+    message.rateLimitType !== undefined || message.overageStatus !== undefined
   /*
    * "Try again in 38 mins when the limit resets" (Mo's wording, 2026-08-18),
    * not "Limits reset in 38 mins". The reset is a fact about the account; what
@@ -225,6 +248,13 @@ function RateLimitWarningBanner({
    *
    * The approaching case gets no such line: nothing has failed there, so there
    * is nothing to try again.
+   *
+   * `message.resetsAt` already covers the neutral lane too: `useEditorChat`
+   * derives it from `retryAfterSeconds` (seconds from now, the only timing
+   * field a bare-429 event carries) at event-ingestion time, once, rather
+   * than here — `Date.now()` in a component's render body is an impure call
+   * that would recompute a different countdown on every re-render, which
+   * `react-hooks/purity` correctly refuses to let through.
    */
   const retryHint =
     message.resetsAt !== undefined
@@ -243,13 +273,15 @@ function RateLimitWarningBanner({
   // The extra-credit pool a claude.ai subscription draws on once the base
   // limit is gone. It belongs in the rejection sentence, because "reached, and
   // nothing left to fall back on" is a different situation from "reached".
+  // Anthropic-only, hence the vendor-fields gate: a provider with no overage
+  // pool cannot have one rejected.
   const noCredits =
-    message.overageStatus === "rejected"
+    hasAnthropicVendorFields && message.overageStatus === "rejected"
       ? " and there are no extra credits available"
       : ""
   const body = isRejected
-    ? `The model request has been denied. The usage limit for this Claude account has been reached${noCredits}.${retryHint}`
-    : `The usage limit for this Claude account is nearly reached${usedHint}.${resetHint} This turn is still running.`
+    ? `The model request has been denied. The usage limit for this ${providerLabel} account has been reached${noCredits}.${retryHint}`
+    : `The usage limit for this ${providerLabel} account is nearly reached${usedHint}.${resetHint} This turn is still running.`
   // Two severities, two named variants. Rejected means the request did not go
   // through, so it is destructive; approaching means the turn is still running
   // and the user can still finish, so it is a warning.
@@ -468,12 +500,26 @@ interface ChatStatusBannersProps {
   ) => Promise<{ ok: boolean; envMissing?: string | null }>
   /**
    * Whether the session's provider reports vendor rate-limit events, from its
-   * descriptor's `capabilities.vendorRateLimitEvents`. Anthropic does; nothing
-   * else does, and `ANTHROPIC_ONLY_EVENT_KINDS` in chat-stream-events.ts is the
-   * enforcement of that. Defaults to true so an older caller that has not been
-   * updated keeps today's behaviour rather than silently losing a banner.
+   * descriptor's `capabilities.vendorRateLimitEvents`. Every servable
+   * provider descriptor sets this true today (Anthropic's own telemetry on
+   * the SDK lane, a bare 429 on the neutral lane — see `streamStepWithRetry`
+   * in `run-chat-turn-neutral.ts`), so this guard currently only matters for
+   * a provider with no descriptor at all (the server's
+   * `FALLBACK_CAPABILITIES`, every flag off). Kept rather than removed: it
+   * is what stops a future provider that genuinely cannot produce this event
+   * from rendering it anyway. Defaults to true so an older caller that has
+   * not been updated keeps today's behaviour rather than silently losing a
+   * banner.
    */
   vendorRateLimitEvents?: boolean
+  /**
+   * The active provider's display label (its descriptor's `label`, e.g.
+   * "Anthropic" or "OpenAI"), passed through to `RateLimitWarningBanner` so
+   * its copy names the right account. Defaults to "Claude" — the label this
+   * banner used to hard-code — so an older caller that has not been updated
+   * keeps today's wording.
+   */
+  providerLabel?: string
 }
 /**
  * Wraps one banner with an optional dismiss control, positioned over the
@@ -546,6 +592,7 @@ export function ChatStatusBanners({
   onDismiss,
   onEnableCapability,
   vendorRateLimitEvents = true,
+  providerLabel = "Claude",
 }: ChatStatusBannersProps) {
   const statusMessages = messages.filter(
     (m): m is Extract<
@@ -574,9 +621,14 @@ export function ChatStatusBanners({
     <div data-testid="chat-status-banners">
       {statusMessages.map((m) => {
         // A provider with no such events cannot produce this message, so this
-        // is belt and braces rather than the gate. It matters anyway: the copy
-        // below names "this Claude account" and an overage credit pool, which
-        // would be a confident lie over an OpenAI session rather than a gap.
+        // is belt and braces rather than the gate: every servable provider
+        // descriptor sets `vendorRateLimitEvents` true today, so in practice
+        // this only fires for a provider the server has no descriptor for at
+        // all. It used to be the ONLY thing standing between a rejected
+        // OpenAI 429 and copy that said "this Claude account" — that is now
+        // the banner's own job (see `RateLimitWarningBanner`'s
+        // `providerLabel` and its Anthropic-fields check), so this guard is
+        // belt and braces for real now, not a euphemism for it.
         if (m.kind === "rate_limit_warning" && vendorRateLimitEvents === false) return null
         // `tone` is decided HERE and the banner picks its own `Alert` variant
         // below, so the two have to agree by hand. That is deliberate rather
@@ -608,7 +660,7 @@ export function ChatStatusBanners({
           ) : m.kind === "overwrite_warning" ? (
             <OverwriteWarningBanner message={m} />
           ) : m.kind === "rate_limit_warning" ? (
-            <RateLimitWarningBanner message={m} />
+            <RateLimitWarningBanner message={m} providerLabel={providerLabel} />
           ) : (
             <ApiRetryBanner message={m} />
           )

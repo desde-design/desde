@@ -13,18 +13,17 @@
  * is covered by a rate-card assertion, and why an id with no card prices at
  * the conservative fallback rather than at zero.
  *
- * A third thing is lost and CANNOT be replaced here: an ABORTED step costs
- * nothing against the ceiling. Usage only arrives on the vendor's `finish`
- * message, and an abort closes the stream before one is sent, so the tokens
- * the vendor has already billed for the partial generation are never
- * recorded. Repeatedly starting and stopping long steps therefore accrues
- * real spend and no ceiling pressure. This is inherent to the wire format —
- * the vendor has not reported the usage yet, so there is nothing to record —
- * and it is written down here rather than fixed, next to the step-boundary
- * overshoot above.
+ * A third thing is only approximated: the cost of a step cut off by a steer
+ * or Stop. On the AI SDK transport usage arrives only on the vendor's
+ * `finish` part, and an abort closes the stream before one is sent, so the
+ * transport reports zero for a request the vendor billed. The loop records
+ * an ESTIMATE for such a step instead (`estimate-cut-off-usage.ts`), flagged
+ * `estimated: true`, and this guard counts it like any other usage. The
+ * estimate errs high, which is the safe direction for a ceiling.
  */
 
 import { estimateUsageCost } from '../llm-providers/rate-cards'
+import type { Usage } from '../llm-providers/types'
 
 export interface CostGuardInput {
   model: string
@@ -35,7 +34,7 @@ export interface CostGuardInput {
 }
 
 export interface CostGuard {
-  record(usage: { inputTokens: number; outputTokens: number }): void
+  record(usage: Usage): void
   /** True once prior spend plus this turn's estimate crosses the ceiling. */
   readonly exceeded: boolean
   /** This turn's estimated cost so far. */

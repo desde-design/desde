@@ -13,8 +13,8 @@ import {
   CLAUDE_CODE_LLM_CONFIG,
   type LLMConfig,
 } from './registry'
-import { AnthropicProvider } from './anthropic-provider'
-import { ClaudeAgentSdkProvider } from './claude-agent-sdk-provider'
+import { AiSdkProvider } from './ai-sdk-provider'
+import { ClaudeAgentSdkProvider } from '../agent-chat-sidecar/claude-agent-sdk-provider'
 import { registerDescriptorForTests } from './provider-registry'
 import { OPENAI_DESCRIPTOR } from './descriptors/openai'
 import type { ProviderDescriptor } from './provider-descriptor'
@@ -52,12 +52,12 @@ describe('getProvider', () => {
       env: { ANTHROPIC_API_KEY: 'sk-fake' } as unknown as NodeJS.ProcessEnv,
     })
     expect(p.name).toBe('anthropic')
-    expect(p).toBeInstanceOf(AnthropicProvider)
+    expect(p).toBeInstanceOf(AiSdkProvider)
   })
 
   /**
    * This test previously asserted the OPPOSITE — that no key silently fell
-   * back to the bundled `claude` binary's subscription. That was fine while
+   * back to the `claude` command line tool on PATH's subscription. That was fine while
    * Editor was a single-user internal tool and wrong the moment it ships:
    * it spends the END USER's personal Claude subscription, which the Agent
    * SDK terms do not permit for distributed software. Inverted deliberately.
@@ -158,8 +158,8 @@ describe('getProvider', () => {
     // The shared env stays clean — no key was mutated onto
     // ANTHROPIC_API_KEY. Each provider holds its own.
     expect(process.env.ANTHROPIC_API_KEY).toBeUndefined()
-    expect(a).toBeInstanceOf(AnthropicProvider)
-    expect(b).toBeInstanceOf(AnthropicProvider)
+    expect(a).toBeInstanceOf(AiSdkProvider)
+    expect(b).toBeInstanceOf(AiSdkProvider)
   })
 })
 

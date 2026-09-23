@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ANTHROPIC_DESCRIPTOR } from './anthropic'
 import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
+import { AiSdkProvider } from '../ai-sdk-provider'
 
 describe('ANTHROPIC_DESCRIPTOR', () => {
-  it('keeps today\'s identity, runtime and credential facts', () => {
+  it('keeps today\'s identity and credential facts', () => {
     expect(ANTHROPIC_DESCRIPTOR.id).toBe('anthropic')
     expect(ANTHROPIC_DESCRIPTOR.label).toBe('Anthropic')
-    expect(ANTHROPIC_DESCRIPTOR.chatRuntime).toBe('claude-agent-sdk')
     expect(ANTHROPIC_DESCRIPTOR.credentials.apiKeyEnvVar).toBe('ANTHROPIC_API_KEY')
     expect(ANTHROPIC_DESCRIPTOR.credentials.maskPrefix).toBe('sk-ant-')
     expect(ANTHROPIC_DESCRIPTOR.credentials.hasSubscriptionRuntime).toBe(true)
@@ -17,19 +17,16 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
     expect(ANTHROPIC_DESCRIPTOR.staticCatalog).toBe(ANTHROPIC_MODEL_CATALOG)
   })
 
-  it('reports the capability asymmetries the SDK lane actually has', () => {
+  it('reports its capability asymmetries', () => {
     expect(ANTHROPIC_DESCRIPTOR.capabilities).toEqual({
-      midTurnSteering: true,
-      vendorReportedCostUsd: true,
-      inTurnBudgetStop: 'vendor',
       reasoningVisibility: true,
       vendorRateLimitEvents: true,
       imagesInPrompt: true,
-      webTools: true,
+      webTools: ['web_search', 'web_fetch'],
     })
   })
 
-  it('builds a provider bound to the key it is given, reading no process.env', () => {
+  it('builds the AI SDK transport, bound to the key it is given, reading no process.env', () => {
     const before = process.env.ANTHROPIC_API_KEY
     process.env.ANTHROPIC_API_KEY = 'sk-ant-from-the-process'
     try {
@@ -37,6 +34,7 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
         apiKey: 'sk-ant-explicit',
         model: 'claude-opus-5',
       })
+      expect(provider).toBeInstanceOf(AiSdkProvider)
       expect(provider.name).toBe('anthropic')
       expect(provider.defaultModel).toBe('claude-opus-5')
     } finally {
@@ -45,7 +43,7 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
     }
   })
 
-  it('offers the five-level effort ladder and puts nothing on the wire', () => {
+  it('offers the five-level effort ladder', () => {
     expect(ANTHROPIC_DESCRIPTOR.effort.levels).toEqual([
       'low',
       'medium',
@@ -53,9 +51,27 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
       'xhigh',
       'max',
     ])
-    // The SDK runtime resolves thinking itself; `toRequest` is the neutral
-    // lane's channel and Anthropic never travels it.
-    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest('high')).toEqual({})
+  })
+
+  it('puts adaptive thinking and the chosen effort on provider options', () => {
+    // The SDK lane resolves thinking itself and ignores this; the neutral
+    // lane's `providerOptionsFor` is what reads it, as
+    // `StreamOpts.providerOptions`. This is the AI SDK's dialect, and since
+    // Task 11 it is exactly what the wire takes: the AI SDK transport
+    // (`buildAnthropicProvider`) is the only provider left.
+    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest('high', 'claude-opus-5')).toEqual({
+      thinking: { type: 'adaptive', display: 'summarized' },
+      effort: 'high',
+    })
+    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest(undefined, 'claude-opus-5')).toEqual({
+      thinking: { type: 'adaptive', display: 'summarized' },
+    })
+  })
+
+  it('falls back to the default model when none is given', () => {
+    expect(ANTHROPIC_DESCRIPTOR.effort.toRequest(undefined)).toEqual({
+      thinking: { type: 'adaptive', display: 'summarized' },
+    })
   })
 })
 

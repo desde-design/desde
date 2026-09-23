@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { writeProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
+import { writeProposalBlob } from '../agent-chat/proposal-blob-store'
 import { resolveSessionConflict } from './resolve-conflict'
 import { loadSession, projectIdForRepoRoot, saveSession } from './session-store'
 import { makeEmptySession, type ChatSession } from './types'

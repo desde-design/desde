@@ -1,0 +1,230 @@
+/**
+ * Unit tests for the WS4 edit-fix mini-turn wrapper. runChatTurnSdk is
+ * injected (deps.runTurn), so these verify the wrapper's own contract:
+ * prompt content, constrained options, sentinel parsing, timeout/error
+ * degradation to a refusal, and throwaway-session hygiene.
+ */
+
+import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, symlinkSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { runEditFixMiniTurn } from './edit-fix-mini-turn'
+import type { EditFixMiniTurnInput } from './edit-fix-mini-turn'
+import type { RunChatTurnSdkOpts, RunChatTurnSdkResult } from '../agent-chat-sidecar/run-chat-turn-sidecar'
+import { makeEmptySession } from '../agent-chat/types'
+
+function makeInput(repoRoot: string, overrides: Partial<EditFixMiniTurnInput> = {}): EditFixMiniTurnInput {
+  return {
+    repoRoot,
+    file: 'src/App.vue',
+    line: 5,
+    column: 3,
+    propName: 'title',
+    newValue: 'Hello',
+    fallback: { kind: 'bound-binding', expression: 'pageTitle' },
+    deterministicReason: 'Cannot overwrite bound prop "title".',
+    ...overrides,
+  }
+}
+
+function turnResultWithText(text: string): RunChatTurnSdkResult {
+  return {
+    session: {} as RunChatTurnSdkResult['session'],
+    turn: {
+      assistantContent: [{ kind: 'text', text }],
+    } as unknown as RunChatTurnSdkResult['turn'],
+  }
+}
+
+describe('runEditFixMiniTurn', () => {
+  /**
+   * FX19 item 4. The field did not exist, so the CLI could not pass the
+   * project's setting even though it had already computed it, and the turn
+   * ran with `undefined` — which every gate reads as "allow". This is the
+   * lane an ordinary inspector prop edit falls into when the deterministic
+   * applicator cannot splice the value, and it hands the model Read, Edit,
+   * Write, Glob and Grep over the untrusted repository.
+   */
+  it('forwards the prototype secret-read policy to the turn', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    const seen: Array<boolean | undefined> = []
+    for (const setting of [true, false, undefined]) {
+      await runEditFixMiniTurn(makeInput(dir, { blockSecretReads: setting }), {
+        runTurn: async (opts) => {
+          seen.push(opts.blockSecretReads)
+          return turnResultWithText('EDIT_APPLIED: done')
+        },
+      })
+    }
+    rmSync(dir, { recursive: true, force: true })
+    expect(seen).toEqual([true, false, undefined])
+  })
+
+  it('constrains the turn: budget, built-ins, disallowed interactive tools', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    let captured: RunChatTurnSdkOpts | null = null
+    const result = await runEditFixMiniTurn(makeInput(dir), {
+      runTurn: async (opts) => {
+        captured = opts
+        return turnResultWithText('EDIT_APPLIED: changed pageTitle ref in src/App.vue')
+      },
+    })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(result).toEqual({
+      outcome: 'applied',
+      notes: 'changed pageTitle ref in src/App.vue',
+    })
+    const opts = captured!
+    expect(opts.maxTurns).toBe(12)
+    expect(opts.costCeilingUsd).toBe(1.0)
+    expect(opts.builtinTools).toEqual(['Read', 'Edit', 'Write', 'Glob', 'Grep'])
+    expect(opts.disallowedTools).toContain('mcp__editor__ask_user_question')
+    expect(opts.disallowedTools).toContain('mcp__editor__propose_prop_edit')
+    // The mini-turn's own write guard must NOT record undo/redo history —
+    // its writes are provisional until the CLI handler's post-turn
+    // validation passes (a refused/unparseable outcome rolls them back,
+    // which would jam a guard-recorded step forever). Pinned here so a
+    // refactor can't silently drop this opt-out.
+    expect(opts.recordHistory).toBe(false)
+    // The prompt carries the refusal context the agent needs.
+    expect(opts.userMessage).toContain('src/App.vue:5:3')
+    expect(opts.userMessage).toContain('"Hello"')
+    expect(opts.userMessage).toContain('pageTitle')
+    expect(opts.userMessage).toContain('EDIT_APPLIED')
+    // Headless: throwaway session id, no-op emit, stub bridge.
+    expect(opts.session.id.sessionId).toMatch(/^mini-edit-fix-/)
+    expect(await opts.bridge.send('chat:get_selection', {})).toBeNull()
+  })
+
+  it('parses EDIT_REFUSED into a refusal with the agent reason', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    const result = await runEditFixMiniTurn(makeInput(dir), {
+      runTurn: async () =>
+        turnResultWithText('I traced the binding.\nEDIT_REFUSED: value is shared by 4 pages'),
+    })
+    rmSync(dir, { recursive: true, force: true })
+    expect(result.outcome).toBe('refused')
+    expect(result.notes).toBe('value is shared by 4 pages')
+  })
+
+  it('treats a missing sentinel as no-verdict (caller diff decides)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    const result = await runEditFixMiniTurn(makeInput(dir), {
+      runTurn: async () => turnResultWithText('I looked around but am not sure.'),
+    })
+    rmSync(dir, { recursive: true, force: true })
+    expect(result.outcome).toBe('no-verdict')
+    expect(result.notes).toMatch(/without an EDIT_APPLIED/)
+  })
+
+  it('degrades a thrown turn (abort/timeout/API error) to a refusal', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    const result = await runEditFixMiniTurn(makeInput(dir), {
+      runTurn: async () => {
+        throw new Error('rate limited')
+      },
+    })
+    rmSync(dir, { recursive: true, force: true })
+    expect(result.outcome).toBe('refused')
+    expect(result.notes).toContain('rate limited')
+  })
+
+  it('cleans up the throwaway session sidecar dir', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    let sessionId = ''
+    await runEditFixMiniTurn(makeInput(dir), {
+      runTurn: async (opts) => {
+        sessionId = opts.session.id.sessionId
+        // Simulate the Read-snapshot hook's sidecar pollution.
+        const bases = join(dir, '.desde', 'chat-sessions', sessionId, 'bases')
+        mkdirSync(bases, { recursive: true })
+        writeFileSync(join(bases, 'abc.txt'), 'snapshot')
+        return turnResultWithText('EDIT_REFUSED: nope')
+      },
+    })
+    // Cleanup is fire-and-forget — give the microtask a beat.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(existsSync(join(dir, '.desde', 'chat-sessions', sessionId))).toBe(false)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('CX7 fix round 1: refuses to delete, and removes nothing, when .desde is a symlink out of the worktree', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mini-turn-'))
+    const outside = mkdtempSync(join(tmpdir(), 'mini-turn-outside-'))
+    let sessionId = ''
+    symlinkSync(outside, join(dir, '.desde'))
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await runEditFixMiniTurn(makeInput(dir), {
+      runTurn: async (opts) => {
+        sessionId = opts.session.id.sessionId
+        return turnResultWithText('EDIT_REFUSED: nope')
+      },
+    })
+    expect(result.outcome).toBe('refused')
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+
+    // Nothing was created at (or removed from) the symlink target.
+    expect(readdirSync(outside)).not.toContain('chat-sessions')
+    expect(sessionId).not.toBe('')
+
+    rmSync(outside, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('runEditFixMiniTurn — provider awareness', () => {
+  it('threads the model and provider id into the injected runtime', async () => {
+    const seen: Array<{ model?: string; providerId?: string }> = []
+    await runEditFixMiniTurn(
+      {
+        repoRoot: '/tmp/does-not-matter',
+        file: 'src/Panel.vue',
+        line: 2,
+        column: 5,
+        propName: 'title',
+        newValue: 'New',
+        fallback: { kind: 'bound-binding', expression: 'title' },
+        deterministicReason: 'not a literal',
+        model: 'gpt-5.6',
+        providerId: 'openai',
+      },
+      {
+        runTurn: async (opts) => {
+          seen.push({ model: opts.model, providerId: opts.providerId })
+          return { session: makeEmptySession('x'), turn: { assistantContent: [{ text: 'EDIT_APPLIED: done' }] } } as never
+        },
+      },
+    )
+    // Without both, the mini-turn runs DEFAULT_SDK_MODEL on whatever runtime it
+    // imported, which for an OpenAI-only user means spending Anthropic
+    // credentials they never provided, or failing for want of them.
+    expect(seen).toEqual([{ model: 'gpt-5.6', providerId: 'openai' }])
+  })
+
+  it('passes no model when the caller supplies none, so the runtime default stands', async () => {
+    const seen: Array<string | undefined> = []
+    await runEditFixMiniTurn(
+      {
+        repoRoot: '/tmp/does-not-matter',
+        file: 'src/Panel.vue',
+        line: 2,
+        column: 5,
+        propName: 'title',
+        newValue: 'New',
+        fallback: { kind: 'v-model' },
+        deterministicReason: 'v-model',
+      },
+      {
+        runTurn: async (opts) => {
+          seen.push(opts.model)
+          return { session: makeEmptySession('x'), turn: { assistantContent: [] } } as never
+        },
+      },
+    )
+    expect(seen).toEqual([undefined])
+  })
+})

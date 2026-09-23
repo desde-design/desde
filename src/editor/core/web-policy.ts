@@ -31,6 +31,16 @@ export interface WebPolicy {
    * allowed to reach. Empty/absent ⇒ WebFetch denied. We deliberately
    * use exact-host match rather than substring or glob — editors
    * can list multiple hosts but cannot inadvertently allow wildcards.
+   *
+   * What a listed host admits depends on WHO fetches:
+   *
+   *  - When Desde fetches (the Claude Agent SDK lane's WebFetch, checked
+   *    by `isWebFetchAllowed`; `download_asset`): the exact host only.
+   *  - When a PROVIDER fetches (the neutral lane's `web_fetch` server tool,
+   *    run by the vendor inside its own response): the host AND its
+   *    subdomains. This list is sent as the vendor's `allowedDomains`, and
+   *    that is how vendors interpret it. No Desde code sees the request, so
+   *    the exact-host check cannot run there.
    */
   webFetchAllowedHosts: ReadonlyArray<string>
   /**

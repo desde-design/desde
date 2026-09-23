@@ -11,7 +11,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
-import { isSecretAgentPath, secretPathDenial } from '../agent-chat-sdk/protected-paths'
+import { isSecretAgentPath, secretPathDenial } from '../agent-chat/protected-paths'
 import { READ_FILE_MAX_BYTES, resolveRepoPath } from '../agent-tools/read-tools'
 import { readRegularFile } from './read-regular-file'
 

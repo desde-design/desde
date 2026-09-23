@@ -1,5 +1,5 @@
 /**
- * SSE event types emitted by `agent-chat-sdk/run-chat-turn-sdk.runChatTurnSdk`
+ * SSE event types emitted by `agent-chat-sidecar/run-chat-turn-sidecar.runChatTurnSdk`
  * and consumed by the shell's `useEditorChat` hook.
  *
  * Append-only — each event is independently meaningful so the UI can
@@ -14,7 +14,7 @@
  * as a tool_result.
  */
 
-import type { ModelImageContent } from '../agent-chat-sdk/media-content'
+import type { ModelImageContent } from '../agent-chat/media-content'
 import type { StopReason } from '../llm-providers/types'
 
 /**
@@ -167,7 +167,7 @@ export type ChatStreamEvent =
        * channel. The model receives it at the next model boundary INSIDE this
        * same turn — measured 2026-08-14: pushed at 4.0s, the in-flight tool
        * result returned at 8.5s, the model consumed it at 10.2s, all before
-       * the turn's `result`. See `agent-chat-sdk/turn-input-channel.ts`.
+       * the turn's `result`. See `agent-chat/turn-input-channel.ts`.
        *
        * Emitted on the OWNING turn's stream rather than only returned to the
        * steering request, because those can be two different clients. The
@@ -207,7 +207,7 @@ export type ChatStreamEvent =
        * consumption is not observable. `POST /steer` hands the message to the
        * SDK's stdin and nothing acknowledges that the model folded it into a
        * request. So the turn watches for model output after the hand-over —
-       * see `takeUndeliveredSteers` in `agent-chat-sdk/turn-input-channel.ts`.
+       * see `takeUndeliveredSteers` in `agent-chat/turn-input-channel.ts`.
        * A turn that ends without producing anything since the hand-over is
        * reported here.
        *
@@ -323,6 +323,12 @@ export type ChatStreamEvent =
        * turns.
        */
       cacheReadInputTokens?: number
+      /**
+       * Set when this frame is the neutral loop's estimate for a step cut
+       * off before its transport reported usage, not the vendor's figure.
+       * See `estimate-cut-off-usage.ts`.
+       */
+      estimated?: true
     }
   | {
       kind: 'turn_complete'
@@ -363,6 +369,13 @@ export type ChatStreamEvent =
        *
        * Sub-second resolution timing for `resetsAt` comes through
        * verbatim; the UI does its own formatting.
+       *
+       * **No longer Claude Agent SDK-only.** The neutral loop's
+       * `streamStepWithRetry` (`run-chat-turn-neutral.ts`) also raises this
+       * kind, off a bare 429 transport error rather than the SDK's
+       * structured telemetry — see `retryAfterSeconds` below, which is
+       * that lane's only field. `ANTHROPIC_ONLY_EVENT_KINDS` no longer
+       * lists this kind for that reason.
        */
       kind: 'rate_limit_warning'
       /**
@@ -387,6 +400,15 @@ export type ChatStreamEvent =
       overageStatus?: 'allowed_warning' | 'rejected'
       /** Epoch ms when the overage window resets. */
       overageResetsAt?: number
+      /**
+       * Seconds until the vendor says a retry is safe, read off a 429's
+       * `retry-after` header. Only the neutral loop's `streamStepWithRetry`
+       * sets this — it has no `resetsAt` timestamp to report, only the raw
+       * transport error, so this is its equivalent of that field. Undefined
+       * when the 429 carried no `retry-after`, and always undefined on the
+       * Claude Agent SDK lane's own emissions of this event.
+       */
+      retryAfterSeconds?: number
     }
   | {
       /**
@@ -482,17 +504,23 @@ export const HANDLER_OWNED_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
  * see, because the happy-path script it drives both lanes over deliberately
  * never produces them.
  *
- * These six DO come from the runtimes — `steered`, `resubmit_required`,
- * `edit_proposed`, `edit_overwrite_warning`, `api_retry`, `error` — but only
+ * `api_retry` used to be a sixth entry here. It no longer is: the coverage
+ * script now drives a retried 429 through both lanes (to observe
+ * `rate_limit_warning` on the neutral lane for real), and a 429 retry always
+ * carries `api_retry` alongside it, so the script exercises this kind too
+ * now, on both sides, by construction rather than by exemption.
+ *
+ * These five DO come from the runtimes — `steered`, `resubmit_required`,
+ * `edit_proposed`, `edit_overwrite_warning`, `error` — but only
  * under a scenario the script does not build: a steer mid-turn, an aborted
  * turn, a file-writing tool call, or a failure. Confirmed by reading both
  * `run-chat-turn-sdk.ts` and `run-chat-turn-neutral.ts`: each carries the
- * emit call for every one of these six kinds, so their absence from the
+ * emit call for every one of these five kinds, so their absence from the
  * coverage script is a gap in the script, not a gap in either runtime.
  * Each already has its own dedicated test: steering in
  * `useEditorChat-turn-ordering.test.ts` and the live harnesses under
- * `tasks/scripts/`, edits in the `edit-service` applicator suites, retries
- * and errors in `classify-turn-error.test.ts` and the neutral loop's own
+ * `tasks/scripts/`, edits in the `edit-service` applicator suites, and
+ * errors in `classify-turn-error.test.ts` and the neutral loop's own
  * tests.
  *
  * Unlike `HANDLER_OWNED_EVENT_KINDS`, membership here is not a claim that
@@ -507,25 +535,37 @@ export const SCRIPT_EXEMPT_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
   'resubmit_required',
   'edit_proposed',
   'edit_overwrite_warning',
-  'api_retry',
   'error',
 ]
 
 /**
- * Kinds only the Claude Agent SDK lane can emit. Exactly one, and that is the
- * decision this constant exists to hold still.
+ * Kinds only the Claude Agent SDK lane can emit. Empty today.
  *
- * `rate_limit_warning`'s fields model Anthropic's rate-limit API and its
- * subscription overage credit pool (`status`, `overageStatus`, `utilization`),
- * and `RateLimitWarningBanner` renders copy about "this Claude account" off
- * them. There is nothing to translate a different vendor's 429 into: on the
- * neutral lane a 429 goes through `classify-turn-error.ts` to the generic
- * error banner, and the loop's own backoff surfaces as `api_retry`.
+ * `rate_limit_warning` used to be the one entry here: its fields model
+ * Anthropic's rate-limit API and subscription overage credit pool (`status`,
+ * `overageStatus`, `utilization`), and there was "nothing to translate a
+ * different vendor's 429 into" — the neutral lane's 429 went through
+ * `classify-turn-error.ts` to the generic error banner instead, and the
+ * loop's own backoff surfaced as `api_retry` alone.
  *
- * Adding an entry here is not a shortcut past a parity gap. It is a claim that
- * the kind is MEANINGLESS off the Anthropic lane, and it needs the same
- * argument this one carries.
+ * That stopped being true when `streamStepWithRetry`
+ * (`run-chat-turn-neutral.ts`) started raising `rate_limit_warning` itself,
+ * off the bare 429 transport error every provider on the neutral lane can
+ * produce — see that event's `retryAfterSeconds` field. The banner
+ * (`RateLimitWarningBanner` in `chat-status-banners.tsx`) is provider-neutral
+ * now too: it takes a `providerLabel` and only adds the Anthropic-specific
+ * overage-credit sentence when the event actually carries `rateLimitType` or
+ * `overageStatus`.
+ *
+ * Kept as a named, empty list rather than deleted: it is still the place a
+ * future kind goes if it turns out to be genuinely Anthropic-only, and
+ * emptying it in place (rather than removing the export) is what let
+ * `event-kind-coverage.test.ts`'s parity checks keep reading it instead of
+ * special-casing "the list used to exist."
+ *
+ * Adding an entry here is not a shortcut past a parity gap. It is a claim
+ * that the kind is MEANINGLESS off the Anthropic lane, and it needs the same
+ * argument this comment used to carry for `rate_limit_warning` — an argument
+ * that turned out not to hold.
  */
-export const ANTHROPIC_ONLY_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = [
-  'rate_limit_warning',
-]
+export const ANTHROPIC_ONLY_EVENT_KINDS: readonly ChatStreamEvent['kind'][] = []

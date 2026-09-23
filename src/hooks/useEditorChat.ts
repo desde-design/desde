@@ -30,7 +30,12 @@ import type {
   ChatStreamEvent,
   EditProposal,
 } from "@/editor/agent-chat/chat-stream-events"
-import type { ChatSteeredMessage, ChatTurn } from "@/editor/agent-chat/types"
+import type {
+  ChatAssistantBlock,
+  ChatSteeredMessage,
+  ChatTurn,
+} from "@/editor/agent-chat/types"
+import { describeServerToolOutput } from "@/editor/agent-chat/server-tool-display"
 import type { SessionModelConfig } from "@/editor/core/model-catalog"
 import {
   appendPendingSteer,
@@ -121,13 +126,22 @@ export type ChatMessage =
     }
   | {
       /**
-       * Phase 5 follow-up — SDK structured rate-limit warning. Fires
-       * when the Anthropic API signals `status: 'allowed_warning'`
-       * (approaching the ceiling) OR `status: 'rejected'` (hard
-       * limit). Distinct from the post-failure
-       * `statusFailureKind: 'rate-limited'` — this is a LIVE banner
-       * so the user knows pressure is mounting OR the request was
-       * rejected before/in addition to any classifier fallback.
+       * Phase 5 follow-up — structured rate-limit warning. Fires when the
+       * Claude Agent SDK lane's own signal says `status: 'allowed_warning'`
+       * (approaching the ceiling) OR `status: 'rejected'` (hard limit).
+       * Distinct from the post-failure `statusFailureKind: 'rate-limited'`
+       * — this is a LIVE banner so the user knows pressure is mounting OR
+       * the request was rejected before/in addition to any classifier
+       * fallback.
+       *
+       * No longer Claude-only: the neutral loop raises this too, off a bare
+       * 429 transport error (see `retryAfterSeconds`, its only field). Every
+       * other field here (`rateLimitType`, `resetsAt`, `utilization`,
+       * `overageStatus`, `overageResetsAt`) models the Claude Agent SDK's
+       * structured telemetry and a neutral-lane event never carries them —
+       * `RateLimitWarningBanner` (`chat-status-banners.tsx`) checks for
+       * `rateLimitType`/`overageStatus` before rendering copy specific to
+       * that account.
        *
        * Latest-wins: a new warning during the same turn overwrites
        * the prior banner so the user always sees the most recent
@@ -141,6 +155,8 @@ export type ChatMessage =
       utilization?: number
       overageStatus?: "allowed_warning" | "rejected"
       overageResetsAt?: number
+      /** Seconds until a retry is safe, off a 429's `retry-after` header. Neutral lane only. */
+      retryAfterSeconds?: number
     }
   | {
       /**
@@ -330,9 +346,12 @@ export interface UseEditorChatReturn {
   /**
    * Deliver a message INTO the turn that is currently running, instead of
    * aborting that turn and starting a new one (which is what `submit` does to
-   * an in-flight turn on the same bucket). The agent receives it at the turn's
-   * next model boundary and decides what to do with it — we never hold a
-   * message back and never decide on the user's behalf whether it interrupts.
+   * an in-flight turn on the same bucket). While a tool is running, the agent
+   * gets the message once that tool call finishes. While the agent is only
+   * writing text, the runtime stops the stream right there, keeps the text
+   * written so far, and hands the agent the message next. Either way, the
+   * agent decides what to do with it. This code never holds a message back
+   * and never decides on the user's behalf whether it interrupts.
    *
    * Never throws and never rejects: every failure path funnels into the
    * pending-steer ledger, which resubmits the message as an ordinary turn. See
@@ -1340,7 +1359,13 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
             ],
           }))
           break
-        case "rate_limit_warning":
+        case "rate_limit_warning": {
+          // Converted once, here, when the event arrives — not in the
+          // banner's render, where `Date.now()` would be an impure call
+          // re-evaluated on every re-render (flagged by react-hooks/purity)
+          // and would give a different "resets in Ns" countdown on every one
+          // of those re-renders besides. See `deriveRateLimitResetsAt`.
+          const derivedResetsAt = deriveRateLimitResetsAt(event)
           // Latest-wins per turn: replace any prior rate_limit_warning
           // OR api_retry in the bucket. See the legacy comment for the
           // full rationale.
@@ -1358,8 +1383,8 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
                 ...(event.rateLimitType
                   ? { rateLimitType: event.rateLimitType }
                   : {}),
-                ...(event.resetsAt !== undefined
-                  ? { resetsAt: event.resetsAt }
+                ...(derivedResetsAt !== undefined
+                  ? { resetsAt: derivedResetsAt }
                   : {}),
                 ...(event.utilization !== undefined
                   ? { utilization: event.utilization }
@@ -1370,17 +1395,27 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
                 ...(event.overageResetsAt !== undefined
                   ? { overageResetsAt: event.overageResetsAt }
                   : {}),
+                ...(event.retryAfterSeconds !== undefined
+                  ? { retryAfterSeconds: event.retryAfterSeconds }
+                  : {}),
               },
             ],
           }))
           break
+        }
         case "api_retry":
+          // Latest-wins over an earlier retry, always. Over a rate-limit
+          // warning only when this retry is for something else: a 429 arrives
+          // as `rate_limit_warning` THEN `api_retry`, and the warning is the
+          // one that carries the vendor's wait (`retryAfterSeconds`).
+          // Replacing it showed the generic retry banner for the whole wait.
           updateBucket(turnId, (b) => ({
             ...b,
             messages: [
               ...b.messages.filter(
                 (m) =>
-                  m.kind !== "rate_limit_warning" && m.kind !== "api_retry",
+                  m.kind !== "api_retry" &&
+                  (m.kind !== "rate_limit_warning" || event.errorStatus === 429),
               ),
               {
                 kind: "api_retry",
@@ -2086,6 +2121,34 @@ export function useEditorChat(opts: UseEditorChatOptions): UseEditorChatReturn {
 }
 
 /**
+ * Convert a `rate_limit_warning` event's timing fields into the one absolute
+ * timestamp `RateLimitWarningBanner` renders off of.
+ *
+ * The Claude Agent SDK lane's events carry `resetsAt` already, an absolute
+ * epoch ms straight off the vendor. The neutral lane's events (raised by
+ * `streamStepWithRetry` in `run-chat-turn-neutral.ts`, off a bare 429) carry
+ * `retryAfterSeconds` instead — seconds from now, the only timing field a
+ * transport error exposes. `resetsAt` wins when both are present (never
+ * happens in practice, but a real vendor value should never lose to a
+ * locally-derived approximation), and this is the only place `Date.now()` is
+ * called for it: once, when the event arrives, exported so a test can pin
+ * the conversion with a mocked clock rather than driving a full turn through
+ * the hook to observe a message that a turn-end backstop clears the instant
+ * the turn finishes (see the `finally` block in `runSubmit`, below).
+ */
+export function deriveRateLimitResetsAt(event: {
+  resetsAt?: number
+  retryAfterSeconds?: number
+}): number | undefined {
+  return (
+    event.resetsAt ??
+    (event.retryAfterSeconds !== undefined
+      ? Date.now() + event.retryAfterSeconds * 1000
+      : undefined)
+  )
+}
+
+/**
  * Drop every assistant message that never received a block, at turn end.
  *
  * `turn_complete`, `tool_result` and friends call `ensureAssistant`, which
@@ -2167,8 +2230,34 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
       id: `${turn.id}:user`,
       text: turn.userMessage,
     })
-    const blocks: AssistantBlockUi[] = turn.assistantContent.map((b) => {
+    // A server tool (the vendor-run web search and fetch) persists its result
+    // as its own block. It renders merged into its call, like any tool, so
+    // the result block maps to `null` HERE and is filtered per segment below.
+    // Filtering first would shift every later index, and the steer positions
+    // (`afterAssistantBlocks`) count the persisted blocks.
+    const serverResults = new Map<string, Extract<ChatAssistantBlock, { type: "server_tool_result" }>>()
+    for (const b of turn.assistantContent) {
+      if (b.type === "server_tool_result") serverResults.set(b.toolUseId, b)
+    }
+    const blocks: Array<AssistantBlockUi | null> = turn.assistantContent.map((b) => {
       if (b.type === "text") return { type: "text", text: b.text }
+      if (b.type === "server_tool_result") return null
+      if (b.type === "server_tool_use") {
+        const served = serverResults.get(b.toolUseId)
+        const summary = served ? describeServerToolOutput(served.output) : undefined
+        return {
+          type: "tool_use",
+          toolUseId: b.toolUseId,
+          name: b.name,
+          input: b.input,
+          result:
+            served === undefined || summary === undefined
+              ? undefined
+              : served.isError
+                ? { ok: false, error: summary }
+                : { ok: true, output: summary },
+        }
+      }
       const result = turn.toolResults[b.toolUseId]
       return {
         type: "tool_use",
@@ -2194,12 +2283,15 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
     turn.steers?.forEach((steer, i) => {
       const at = Math.min(Math.max(steer.afterAssistantBlocks, cursor), blocks.length)
       if (at > cursor) {
-        out.push({
-          kind: "assistant",
-          id: assistantSegmentId(turn.id, segment),
-          blocks: blocks.slice(cursor, at),
-        })
-        segment += 1
+        const shown = blocks.slice(cursor, at).filter(isShownBlock)
+        if (shown.length > 0) {
+          out.push({
+            kind: "assistant",
+            id: assistantSegmentId(turn.id, segment),
+            blocks: shown,
+          })
+          segment += 1
+        }
         cursor = at
       }
       out.push({
@@ -2220,7 +2312,7 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
     // this makes the rule uniform rather than adding a new one. Nothing is
     // lost: every block still renders exactly once, because `cursor` only ever
     // moves forward and a non-empty tail is still always pushed.
-    const tail = blocks.slice(cursor)
+    const tail = blocks.slice(cursor).filter(isShownBlock)
     if (tail.length > 0) {
       out.push({
         kind: "assistant",
@@ -2237,6 +2329,10 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
     }
   }
   return out
+}
+
+function isShownBlock(b: AssistantBlockUi | null): b is AssistantBlockUi {
+  return b !== null
 }
 
 /**

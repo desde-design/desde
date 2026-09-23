@@ -5,16 +5,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // Re-exported from the one file allowed to import the AI SDK, rather than
 // importing `ai` here directly — see the fence in `ai-sdk-provider.ts`.
 import { APICallError, RetryError } from '../llm-providers/ai-sdk-provider'
+// The Anthropic SDK's own abort error, whose `name` is plain 'Error'. Built
+// from the installed package, not hand-shaped, because the interrupt path's
+// reason for not keying on `name === 'AbortError'` is this class.
+import { APIUserAbortError } from '@anthropic-ai/sdk'
 
 import type { BridgeClient } from '../agent-tools/types'
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
 import { resolveSessionConflict } from '../agent-chat/resolve-conflict'
 import { ELIDED_TOOL_IMAGE } from './context-budget'
+import { replayHistory } from './history-replay'
 import { makeEmptySession } from '../agent-chat/types'
-import { readProposalBlob } from '../agent-chat-sdk/proposal-blob-store'
-import { createTurnInputChannel } from '../agent-chat-sdk/turn-input-channel'
+import { readProposalBlob } from '../agent-chat/proposal-blob-store'
+import { createTurnInputChannel } from '../agent-chat/turn-input-channel'
 import { OPENAI_DESCRIPTOR } from '../llm-providers/descriptors/openai'
-import type { LLMProvider, ProviderEvent, StreamOpts } from '../llm-providers/types'
+import { resolveAnthropicThinkingConfig } from '../llm-providers/anthropic-adaptive-thinking'
+import type { LLMProvider, ProviderEvent, StreamOpts, TextBlock } from '../llm-providers/types'
 import {
   API_RETRY_MAX_ATTEMPTS,
   MAX_NEUTRAL_STEPS,
@@ -33,13 +39,17 @@ afterEach(() => rmSync(root, { recursive: true, force: true }))
 const bridge: BridgeClient = { send: async () => null }
 
 /** A provider driven by a script: one array of ProviderEvents per model step. */
-function scriptedProvider(steps: ProviderEvent[][]): {
+function scriptedProvider(
+  steps: ProviderEvent[][],
+  extras: Partial<Pick<LLMProvider, 'serverToolIds'>> = {},
+): {
   provider: LLMProvider
   calls: StreamOpts[]
 } {
   const calls: StreamOpts[] = []
   let i = 0
   const provider: LLMProvider = {
+    ...extras,
     name: 'scripted',
     defaultModel: 'scripted-1',
     complete: async () => ({ text: '', stopReason: 'end_turn' }),
@@ -78,8 +88,9 @@ const toolStep = (id: string, name: string, input: unknown): ProviderEvent[] => 
 async function run(
   steps: ProviderEvent[][],
   overrides: Record<string, unknown> = {},
+  providerExtras: Partial<Pick<LLMProvider, 'serverToolIds'>> = {},
 ): Promise<{ events: ChatStreamEvent[]; result: Awaited<ReturnType<typeof runChatTurnNeutral>>; calls: StreamOpts[] }> {
-  const { provider, calls } = scriptedProvider(steps)
+  const { provider, calls } = scriptedProvider(steps, providerExtras)
   const events: ChatStreamEvent[] = []
   const result = await runChatTurnNeutral(
     minimalOpts({ emit: (e: ChatStreamEvent) => events.push(e), ...overrides }) as never,
@@ -153,6 +164,25 @@ describe('the default provider path', () => {
   })
 })
 
+describe('runChatTurnNeutral: provider options', () => {
+  it("carries the turn's own model into the Anthropic descriptor's toRequest, not the descriptor's default", async () => {
+    // claude-opus-5 is one of ADAPTIVE_THINKING_MODELS
+    // (anthropic-adaptive-thinking.ts), distinct from ANTHROPIC_DEFAULT_MODEL
+    // (claude-sonnet-4-6) — so this only passes if `model` actually travels
+    // from the loop's own opts through providerOptionsFor to toRequest,
+    // rather than toRequest quietly falling back to its own default.
+    const { calls } = await run([textStep('done')], {
+      model: 'claude-opus-5',
+      effort: 'high',
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].providerOptions).toEqual({
+      thinking: resolveAnthropicThinkingConfig('claude-opus-5'),
+      effort: 'high',
+    })
+  })
+})
+
 describe('runChatTurnNeutral: one text turn', () => {
   it('emits turn_start, the deltas, usage and turn_complete, in that order', async () => {
     const { events } = await run([textStep('done')])
@@ -169,6 +199,77 @@ describe('runChatTurnNeutral: one text turn', () => {
     const { result } = await run([textStep('done')])
     expect(result.turn.assistantContent).toEqual([{ type: 'text', text: 'done' }])
     expect(result.turn.usage).toEqual({ inputTokens: 10, outputTokens: 2 })
+  })
+
+  it('accumulates cache-read and cache-creation tokens onto the persisted turn usage', async () => {
+    const step: ProviderEvent[] = [
+      { kind: 'text_delta', delta: 'done' },
+      {
+        kind: 'usage',
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadInputTokens: 1000,
+        cacheCreationInputTokens: 500,
+      },
+      {
+        kind: 'message_complete',
+        stopReason: 'end_turn',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+        usage: {
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadInputTokens: 1000,
+          cacheCreationInputTokens: 500,
+        },
+      },
+    ]
+    const { events, result } = await run([step])
+    const usageEvent = events.find((e) => e.kind === 'usage')
+    if (usageEvent?.kind !== 'usage') throw new Error('expected usage')
+    expect(usageEvent.cacheReadInputTokens).toBe(1000)
+    expect(usageEvent.cacheCreationInputTokens).toBe(500)
+    expect(result.turn.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
+  })
+
+  it('emits a shortfall usage event when message_complete.usage reports more cache tokens than were streamed', async () => {
+    // Mirrors the existing inputTokens/outputTokens shortfall reconciliation:
+    // a provider that only reports usage on its final message still gets its
+    // cache counters counted, via the same "extra" math.
+    const step: ProviderEvent[] = [
+      { kind: 'text_delta', delta: 'done' },
+      { kind: 'usage', inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 100 },
+      {
+        kind: 'message_complete',
+        stopReason: 'end_turn',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+        usage: {
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadInputTokens: 400,
+          cacheCreationInputTokens: 50,
+        },
+      },
+    ]
+    const { events, result } = await run([step])
+    const usageEvents = events.filter((e): e is Extract<ChatStreamEvent, { kind: 'usage' }> => e.kind === 'usage')
+    expect(usageEvents).toHaveLength(2)
+    expect(usageEvents[1]).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 300,
+      cacheCreationInputTokens: 50,
+    })
+    expect(result.turn.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 400,
+      cacheCreationInputTokens: 50,
+    })
   })
 
   it('appends the turn to the session and NEVER sets sdkSessionId', async () => {
@@ -195,6 +296,39 @@ describe('runChatTurnNeutral: one text turn', () => {
     })
     const first = calls[0].messages[0] as unknown as { content: Array<Record<string, unknown>> }
     expect(first.content[1]).toEqual({ type: 'image', mediaType: 'image/png', data: 'AAAA' })
+  })
+
+  it('sends the system prompt as one cache-hinted block', async () => {
+    const { calls } = await run([textStep('ok')])
+    const sys = calls[0].system as TextBlock[]
+    expect(sys[0]).toMatchObject({ cacheHint: 'ephemeral' })
+    expect(sys).toHaveLength(1)
+  })
+
+  it('puts the budget notice in its own unhinted block, after the cached prompt block', async () => {
+    // Force `applyContextBudget` to elide: one prior turn whose tool result
+    // is bigger than `DEFAULT_CONTEXT_BUDGET_CHARS` (600k chars).
+    const spent = {
+      ...makeEmptySession('p1'),
+      turns: [
+        {
+          id: 't0',
+          startedAt: '2026-09-03T00:00:00.000Z',
+          userMessage: 'read the file',
+          assistantContent: [
+            { type: 'tool_use' as const, toolUseId: 'tu_1', name: 'Read', input: {} },
+          ],
+          toolResults: { tu_1: { ok: true, output: 'x'.repeat(700_000) } },
+          editProposals: [],
+        },
+      ],
+    }
+    const { calls } = await run([textStep('ok')], { session: spent })
+    const sys = calls[0].system as TextBlock[]
+    expect(sys).toHaveLength(2)
+    expect(sys[0]).toMatchObject({ cacheHint: 'ephemeral' })
+    expect(sys[1]?.cacheHint).toBeUndefined()
+    expect(sys[1]?.text).toMatch(/shortened to fit/)
   })
 })
 
@@ -305,6 +439,125 @@ function alwaysRateLimited(retryAfter: string): {
   }
   return { provider, attempts: () => attempts }
 }
+
+describe('runChatTurnNeutral: provider server-side web tools', () => {
+  const serverDefs = (calls: StreamOpts[]) =>
+    calls[0]!.tools.filter((t) => t.kind === 'server')
+  /** A provider object that sends both server tools, like the AI SDK transport. */
+  const SENDS_BOTH = { serverToolIds: ['web_search', 'web_fetch'] as const }
+
+  it('declares nothing when the built provider reports no server tools', async () => {
+    // The direct Anthropic provider strips server tools. The descriptor says
+    // the vendor has both; offering them anyway would promise the model tools
+    // that never reach the request.
+    const { calls } = await run([textStep('done')], {
+      providerId: 'anthropic',
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
+    })
+    expect(serverDefs(calls)).toEqual([])
+    expect(calls[0]!.system).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('# Web tools') })]),
+    )
+  })
+
+  it('declares nothing when the web policy turns nothing on', async () => {
+    const { calls } = await run([textStep('done')], {
+      webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: false },
+    })
+    expect(serverDefs(calls)).toEqual([])
+  })
+
+  it('declares fetch with the allowlist and search, on a provider that serves both', async () => {
+    const { calls } = await run([textStep('done')], {
+      providerId: 'anthropic',
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
+    }, SENDS_BOTH)
+    expect(serverDefs(calls)).toEqual([
+      { kind: 'server', id: 'web_search' },
+      { kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] },
+    ])
+  })
+
+  it('declares only the ids the chosen provider lists in webTools', async () => {
+    // OpenAI has no fetch tool. Declaring one anyway would be a promise the
+    // transport silently drops, so the loop does not ask for it.
+    const { calls } = await run([textStep('done')], {
+      providerId: 'openai',
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
+    }, SENDS_BOTH)
+    expect(serverDefs(calls)).toEqual([{ kind: 'server', id: 'web_search' }])
+  })
+
+  it('does not declare fetch when the allowlist is empty, even with search on', async () => {
+    const { calls } = await run([textStep('done')], {
+      webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: true },
+    }, SENDS_BOTH)
+    expect(serverDefs(calls)).toEqual([{ kind: 'server', id: 'web_search' }])
+  })
+
+  it('streams a vendor-run call as a tool, persists both blocks, and runs nothing itself', async () => {
+    const output = {
+      type: 'web_fetch_result',
+      url: 'https://example.com/',
+      content: { title: 'Example Domain' },
+    }
+    const step: ProviderEvent[] = [
+      { kind: 'server_tool_use', id: 'srv_1', name: 'web_fetch', input: { url: 'https://example.com/' } },
+      { kind: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output },
+      { kind: 'text_delta', delta: 'Example Domain.' },
+      {
+        kind: 'message_complete',
+        stopReason: 'end_turn',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'server_tool_use', id: 'srv_1', name: 'web_fetch', input: { url: 'https://example.com/' } },
+            { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output },
+            { type: 'text', text: 'Example Domain.' },
+          ],
+        },
+        usage: { inputTokens: 5, outputTokens: 5 },
+      },
+    ]
+    const { events, result, calls } = await run([step], {
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: false },
+    }, SENDS_BOTH)
+    // One request: the vendor ran the fetch, so there is no second step.
+    expect(calls).toHaveLength(1)
+    expect(result.turn.error).toBeUndefined()
+    expect(events.filter((e) => e.kind === 'tool_use_start' || e.kind === 'tool_result')).toEqual([
+      {
+        kind: 'tool_use_start',
+        turnId: expect.any(String),
+        toolUseId: 'srv_1',
+        name: 'web_fetch',
+        input: { url: 'https://example.com/' },
+      },
+      {
+        kind: 'tool_result',
+        turnId: expect.any(String),
+        toolUseId: 'srv_1',
+        ok: true,
+        output: 'Fetched https://example.com/: Example Domain',
+      },
+    ])
+    // Tagged with the provider that produced them, so a later turn on a
+    // different provider leaves them out of replay.
+    expect(result.turn.assistantContent).toEqual([
+      {
+        type: 'server_tool_use',
+        provider: 'anthropic',
+        toolUseId: 'srv_1',
+        name: 'web_fetch',
+        input: { url: 'https://example.com/' },
+      },
+      { type: 'server_tool_result', provider: 'anthropic', toolUseId: 'srv_1', name: 'web_fetch', output },
+      { type: 'text', text: 'Example Domain.' },
+    ])
+    // Nothing was recorded as a Desde-run tool result.
+    expect(result.turn.toolResults).toEqual({})
+  })
+})
 
 describe('runChatTurnNeutral: failures', () => {
   it('retries a transient failure that produced no output, and reports the wait', async () => {
@@ -446,6 +699,137 @@ describe('runChatTurnNeutral: failures', () => {
       attempt: 1,
       errorStatus: 429,
     })
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('raises rate_limit_warning ahead of api_retry on a 429, carrying the retry-after seconds', async () => {
+    // The neutral loop's only rate-limit signal is this transport error —
+    // there is no SDK telemetry to read a tier or a reset timestamp off of.
+    // `retryAfterSeconds` is this lane's stand-in for `resetsAt`.
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'Rate limit reached. Please try again later.',
+              url: 'https://api.openai.com/v1/responses',
+              requestBodyValues: {},
+              statusCode: 429,
+              responseHeaders: { 'retry-after': '7' },
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    const rateLimitIndex = events.findIndex((e) => e.kind === 'rate_limit_warning')
+    const retryIndex = events.findIndex((e) => e.kind === 'api_retry')
+    expect(rateLimitIndex).toBeGreaterThanOrEqual(0)
+    expect(retryIndex).toBeGreaterThan(rateLimitIndex)
+    expect(events[rateLimitIndex]).toMatchObject({
+      kind: 'rate_limit_warning',
+      status: 'rejected',
+      retryAfterSeconds: 7,
+    })
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('raises rate_limit_warning on a 429 with no retry-after header, without retryAfterSeconds', async () => {
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'Rate limit reached. Please try again later.',
+              url: 'https://api.openai.com/v1/responses',
+              requestBodyValues: {},
+              statusCode: 429,
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    const event = events.find((e) => e.kind === 'rate_limit_warning')
+    expect(event).toMatchObject({ kind: 'rate_limit_warning', status: 'rejected' })
+    expect(event).not.toHaveProperty('retryAfterSeconds')
+  })
+
+  it('does not raise rate_limit_warning on a retried 503: it is not a rate limit', async () => {
+    let attempts = 0
+    const provider: LLMProvider = {
+      name: 'flaky',
+      defaultModel: 'x',
+      complete: async () => ({ text: '', stopReason: 'end_turn' }),
+      streamConversation: () => {
+        const firstAttempt = ++attempts === 1
+        return (async function* () {
+          if (firstAttempt) {
+            throw new APICallError({
+              message: 'service unavailable',
+              url: 'https://api.openai.com/v1/responses',
+              requestBodyValues: {},
+              statusCode: 503,
+              isRetryable: true,
+            })
+          }
+          for (const ev of textStep('recovered')) yield ev
+        })()
+      },
+    }
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge,
+        worktreeRoot: root,
+        session: makeEmptySession('p1'),
+        userMessage: 'hi',
+        providerId: 'anthropic',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      { buildProvider: () => provider },
+    )
+    expect(attempts).toBe(2)
+    expect(events.filter((e) => e.kind === 'rate_limit_warning')).toEqual([])
+    expect(events.find((e) => e.kind === 'api_retry')).toMatchObject({ errorStatus: 503 })
     expect(result.turn.error).toBeUndefined()
   })
 
@@ -835,10 +1219,12 @@ describe('runChatTurnNeutral: steering', () => {
       content: [{ type: 'text', text: 'actually the sidebar' }],
     })
     // This lane emits `steered` itself, at the boundary where it delivers the
-    // steer, and the steer route suppresses its own frame for a neutral turn
-    // (`LiveTurn.runtimeEmitsSteered`) so the client still sees exactly one.
-    // The emitter must be the side that knows the position: the client cuts
-    // its transcript on this frame, and `result.turn.steers` records the same
+    // steer. Both runtimes now emit their own `steered` frame at the moment
+    // they know where a mid-turn steer landed (Task 26 deleted the steer
+    // route's runtimeEmitsSteered/laneConfirmed reconciliation machinery that
+    // used to decide which side announces), so the client sees exactly one
+    // either way. The emitter must be the side that knows the position: the
+    // client cuts its transcript on this frame, and `result.turn.steers` records the same
     // moment. Emitting from the route instead cut the live transcript at
     // accept time while hydration replayed the delivery position, which
     // `useEditorChat-turn-ordering.test.ts` caught as a live/hydrated
@@ -894,14 +1280,19 @@ describe('runChatTurnNeutral: steering', () => {
   })
 
   it('reports a steer that arrived after the last step for resubmission', async () => {
+    // Pushed AFTER the step's `message_complete` was handed over, so there is
+    // nothing left to interrupt: the provider call already finished, and the
+    // loop is about to end the turn. The steer cannot reach the model in this
+    // turn, so the user is asked to send it again.
     const channel = createTurnInputChannel()
     const { provider } = scriptedProvider([textStep('all done')])
     const events: ChatStreamEvent[] = []
     const original = provider.streamConversation.bind(provider)
-    provider.streamConversation = (o) => {
-      channel.push('one more thing')
-      return original(o)
-    }
+    provider.streamConversation = (o) =>
+      (async function* (): AsyncGenerator<ProviderEvent> {
+        yield* original(o) as AsyncGenerator<ProviderEvent>
+        channel.push('one more thing')
+      })()
     await runChatTurnNeutral(
       {
         bridge,
@@ -953,6 +1344,573 @@ describe('runChatTurnNeutral: steering', () => {
 })
 
 /**
+ * A provider written one step at a time: `step` gets that step's own
+ * `StreamOpts` (so it can wait on the step's signal) and its index.
+ */
+function stepwiseProvider(
+  step: (o: StreamOpts, index: number) => AsyncGenerator<ProviderEvent>,
+): { provider: LLMProvider; calls: StreamOpts[] } {
+  const calls: StreamOpts[] = []
+  const provider: LLMProvider = {
+    name: 'stepwise',
+    defaultModel: 'stepwise-1',
+    complete: async () => ({ text: '', stopReason: 'end_turn' }),
+    streamConversation: (o) => {
+      calls.push(o)
+      return step(o, calls.length - 1)
+    },
+  }
+  return { provider, calls }
+}
+
+/**
+ * Park until `signal` fires, then throw what `fetch` throws on abort. This is
+ * the first of the two shapes a real transport produces when its signal fires
+ * mid-request.
+ */
+async function abortedBy(signal: AbortSignal): Promise<never> {
+  if (!signal.aborted) {
+    await new Promise<void>((resolve) =>
+      signal.addEventListener('abort', () => resolve(), { once: true }),
+    )
+  }
+  throw new DOMException('This operation was aborted', 'AbortError')
+}
+
+/**
+ * The second shape: the stream ENDS rather than throwing, and the transport
+ * completes the message with what it had. `ai-sdk-provider.ts` keeps the
+ * blocks it assembled (`content`), `anthropic-provider.ts` sends none; both
+ * say `stopReason: 'error'`, `vendorStopReason: 'aborted'`.
+ */
+function* adapterAbortTail(
+  content: ReadonlyArray<{ type: 'text'; text: string }>,
+  { streamsUsage }: { streamsUsage: boolean },
+): Generator<ProviderEvent> {
+  // `ai-sdk-provider.ts` yields a `usage` event before the completion;
+  // `anthropic-provider.ts` does not on abort, so for that shape the step's
+  // cost reaches the turn only through `message_complete.usage`.
+  if (streamsUsage) yield { kind: 'usage', inputTokens: 3, outputTokens: 1 }
+  yield {
+    kind: 'message_complete',
+    stopReason: 'error',
+    vendorStopReason: 'aborted',
+    message: { role: 'assistant', content },
+    usage: { inputTokens: 3, outputTokens: 1 },
+  }
+}
+
+async function runSteered(
+  provider: LLMProvider,
+  channel: ReturnType<typeof createTurnInputChannel>,
+  overrides: Record<string, unknown> = {},
+): Promise<{ events: ChatStreamEvent[]; result: Awaited<ReturnType<typeof runChatTurnNeutral>> }> {
+  const events: ChatStreamEvent[] = []
+  const result = await runChatTurnNeutral(
+    minimalOpts({
+      inputChannel: channel,
+      emit: (e: ChatStreamEvent) => events.push(e),
+      ...overrides,
+    }) as never,
+    { buildProvider: () => provider },
+  )
+  return { events, result }
+}
+
+describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
+  it('a steer accepted mid-text aborts the step, keeps the text, appends the steer, and continues', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Hel' }
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+
+    expect(calls).toHaveLength(2)
+    const replayed = calls[1].messages
+    expect(replayed.at(-2)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Hel' }] })
+    expect(replayed.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: 'stop, do X' }] })
+    expect(result.turn.steers?.[0]).toMatchObject({ text: 'stop, do X', afterAssistantBlocks: 1 })
+    expect(result.turn.error).toBeUndefined()
+    expect(result.turn.assistantContent).toEqual([
+      { type: 'text', text: 'Hel' },
+      { type: 'text', text: 'done' },
+    ])
+    expect(events.filter((e) => e.kind === 'steered')).toEqual([
+      { kind: 'steered', sessionId: 'p1', userMessage: 'stop, do X', imageCount: 0 },
+    ])
+    expect(events.filter((e) => e.kind === 'resubmit_required')).toEqual([])
+    expect(events.filter((e) => e.kind === 'error')).toEqual([])
+  })
+
+  it('replays the interrupting steer on the next turn where the model saw it in this one', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Working on the header. ' }
+        channel.push('no, the sidebar')
+        await abortedBy(o.signal!)
+      }
+      if (i === 1) {
+        yield* toolStep('tu_1', 'Read', { file_path: 'src/App.vue' })
+        return
+      }
+      yield* textStep('Sidebar done.')
+    })
+    const { result } = await runSteered(provider, channel)
+    expect(result.turn.error).toBeUndefined()
+    expect(result.turn.steers).toEqual([{ text: 'no, the sidebar', afterAssistantBlocks: 1 }])
+
+    // What the model saw on this turn's last step, plus the answer it gave.
+    const inTurn = [
+      ...calls[2].messages,
+      { role: 'assistant', content: [{ type: 'text', text: 'Sidebar done.' }] },
+    ]
+    // What it will be shown on the next turn. The opening message carries a
+    // per-turn context envelope live and only the user's words on replay, so
+    // the first message is compared by role alone.
+    const replayed = await replayHistory({
+      session: result.session,
+      repoRoot: root,
+      providerId: 'anthropic',
+    })
+    expect(replayed.map((m) => m.role)).toEqual(inTurn.map((m) => m.role))
+    expect(replayed.slice(1)).toEqual(inTurn.slice(1))
+  })
+
+  it('gives each step a signal of its own, so an interrupt never aborts the turn', async () => {
+    const channel = createTurnInputChannel()
+    const controller = new AbortController()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    await runSteered(provider, channel, { signal: controller.signal })
+    expect(calls).toHaveLength(2)
+    expect(calls[0].signal).toBeDefined()
+    expect(calls[0].signal).not.toBe(controller.signal)
+    expect(calls[0].signal!.aborted).toBe(true)
+    expect(calls[1].signal!.aborted).toBe(false)
+    expect(controller.signal.aborted).toBe(false)
+    // The user's Stop still reaches a step through its own signal.
+    controller.abort()
+    expect(calls[1].signal!.aborted).toBe(true)
+  })
+
+  it('a steer accepted before any block drops the empty assistant message', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+
+    expect(calls).toHaveLength(2)
+    const replayed = calls[1].messages
+    // The opening user message, then the steer directly after it: no empty
+    // assistant message between them.
+    expect(replayed).toHaveLength(2)
+    expect(replayed[0]).toEqual(calls[0].messages[0])
+    expect(replayed[1]).toEqual({ role: 'user', content: [{ type: 'text', text: 'stop, do X' }] })
+    expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 0 }])
+    expect(result.turn.assistantContent).toEqual([{ type: 'text', text: 'done' }])
+    expect(result.turn.error).toBeUndefined()
+    expect(events.filter((e) => e.kind === 'resubmit_required')).toEqual([])
+  })
+
+  it('a steer accepted after a complete tool_use drops the call and does not run it', async () => {
+    const channel = createTurnInputChannel()
+    const write = { file_path: 'src/Late.vue', content: 'nope\n' }
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Writing it now. ' }
+        yield { kind: 'tool_use', id: 'tu_1', name: 'Write', input: write }
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+
+    expect(calls).toHaveLength(2)
+    // Never run.
+    expect(existsSync(join(root, 'src/Late.vue'))).toBe(false)
+    expect(events.filter((e) => e.kind === 'tool_result')).toEqual([])
+    expect(result.turn.toolResults).toEqual({})
+    // Not in the conversation: a tool_use with no tool_result is a request
+    // every vendor refuses.
+    expect(JSON.stringify(calls[1].messages)).not.toContain('tu_1')
+    expect(calls[1].messages.at(-2)).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Writing it now. ' }],
+    })
+    expect(calls[1].messages.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'stop, do X' }],
+    })
+    // Not on the persisted turn, and never shown live either: the client
+    // would otherwise render a tool disclosure that no result ever resolves,
+    // and that hydration would not reproduce.
+    expect(JSON.stringify(result.turn.assistantContent)).not.toContain('tu_1')
+    expect(events.filter((e) => e.kind === 'tool_use_start')).toEqual([])
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('a user abort during a step is still an abort, not an interrupt', async () => {
+    const channel = createTurnInputChannel()
+    const controller = new AbortController()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Hel' }
+        controller.abort()
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('never')
+    })
+    const { events, result } = await runSteered(provider, channel, { signal: controller.signal })
+
+    expect(calls).toHaveLength(1)
+    expect(result.turn.error).toBe('turn aborted')
+    expect(events.filter((e) => e.kind === 'steered')).toEqual([])
+  })
+
+  it('a steer and a Stop together: Stop wins, and the steer is handed back', async () => {
+    const channel = createTurnInputChannel()
+    const controller = new AbortController()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Hel' }
+        channel.push('stop, do X')
+        controller.abort()
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('never')
+    })
+    const { events, result } = await runSteered(provider, channel, { signal: controller.signal })
+
+    expect(calls).toHaveLength(1)
+    expect(result.turn.error).toBe('turn aborted')
+    expect(events.filter((e) => e.kind === 'steered')).toEqual([])
+    expect(events.filter((e) => e.kind === 'resubmit_required')).toEqual([
+      { kind: 'resubmit_required', sessionId: 'p1', userMessage: 'stop, do X' },
+    ])
+  })
+
+  it.each([
+    [
+      'keeps the blocks it assembled and streams usage (ai-sdk-provider)',
+      [{ type: 'text' as const, text: 'Hel' }],
+      true,
+    ],
+    ['sends no blocks and no usage event (anthropic-provider)', [], false],
+  ])(
+    'treats a stream that ENDS on the abort as an interrupt too, when the transport %s',
+    async (_label, content, streamsUsage) => {
+      const channel = createTurnInputChannel()
+      const { provider, calls } = stepwiseProvider(async function* (_o, i) {
+        if (i === 0) {
+          yield { kind: 'text_delta', delta: 'Hel' }
+          channel.push('stop, do X')
+          yield* adapterAbortTail(content, { streamsUsage })
+          return
+        }
+        yield* textStep('done')
+      })
+      const { events, result } = await runSteered(provider, channel)
+
+      expect(calls).toHaveLength(2)
+      expect(calls[1].messages.at(-2)).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hel' }],
+      })
+      expect(calls[1].messages.at(-1)).toEqual({
+        role: 'user',
+        content: [{ type: 'text', text: 'stop, do X' }],
+      })
+      expect(result.turn.error).toBeUndefined()
+      expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 1 }])
+      expect(events.filter((e) => e.kind === 'error')).toEqual([])
+      // The interrupted request was still billed, so it is still counted.
+      expect(result.turn.usage).toEqual({ inputTokens: 13, outputTokens: 3 })
+      expect(events.at(-1)).toMatchObject({ kind: 'turn_complete', stopReason: 'end_turn' })
+    },
+  )
+
+  it('does not retry an interrupted step: the next request is the steered one', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        channel.push('stop, do X')
+        // A RETRIABLE failure, thrown before anything was yielded: exactly
+        // the case the retry loop would otherwise try again. Retrying would
+        // send the stale request; the steer must go out instead.
+        await new Promise((r) => setTimeout(r, 0))
+        throw new APICallError({
+          message: 'service unavailable',
+          url: 'https://api.openai.com/v1/responses',
+          requestBodyValues: {},
+          statusCode: 503,
+          isRetryable: true,
+        })
+      }
+      yield* textStep('done')
+    })
+    const events: ChatStreamEvent[] = []
+    const { result } = await runSteered(provider, channel, {
+      emit: (e: ChatStreamEvent) => events.push(e),
+    })
+    // Two calls, not three: the 503 was not retried, and no wait was taken.
+    expect(calls).toHaveLength(2)
+    expect(events.filter((e) => e.kind === 'api_retry')).toEqual([])
+    expect(calls[1].messages.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'stop, do X' }],
+    })
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('emits no rate_limit_warning for a 429 that arrives after the step was interrupted', async () => {
+    // Same shape as the 503 case above, but the failure IS the kind that
+    // would otherwise raise rate_limit_warning. `interrupted()` is checked
+    // before the 429/status branch runs, so the step returns before either
+    // rate_limit_warning or api_retry is emitted — the steer is what the
+    // user asked for, not a retried request for the turn that was cut off.
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        channel.push('stop, do X')
+        await new Promise((r) => setTimeout(r, 0))
+        throw new APICallError({
+          message: 'Rate limit reached. Please try again later.',
+          url: 'https://api.openai.com/v1/responses',
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '7' },
+          isRetryable: true,
+        })
+      }
+      yield* textStep('done')
+    })
+    const events: ChatStreamEvent[] = []
+    const { result } = await runSteered(provider, channel, {
+      emit: (e: ChatStreamEvent) => events.push(e),
+    })
+    // Two calls, not three: the 429 was not retried, and no wait was taken.
+    expect(calls).toHaveLength(2)
+    expect(events.filter((e) => e.kind === 'rate_limit_warning')).toEqual([])
+    expect(events.filter((e) => e.kind === 'api_retry')).toEqual([])
+    expect(calls[1].messages.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'stop, do X' }],
+    })
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('abandons a retry wait for the steer instead of re-sending the stale request', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        throw new APICallError({
+          message: 'Rate limit reached. Please try again later.',
+          url: 'https://api.openai.com/v1/responses',
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '3600' },
+          isRetryable: true,
+        })
+      }
+      yield* textStep('done')
+    })
+    let startedWaitingAt = 0
+    const events: ChatStreamEvent[] = []
+    const { result } = await runSteered(provider, channel, {
+      emit: (e: ChatStreamEvent) => {
+        events.push(e)
+        if (e.kind !== 'api_retry') return
+        startedWaitingAt = Date.now()
+        channel.push('stop, do X')
+      },
+    })
+    expect(calls).toHaveLength(2)
+    expect(events.filter((e) => e.kind === 'api_retry')).toHaveLength(1)
+    expect(Date.now() - startedWaitingAt).toBeLessThan(2000)
+    expect(calls[1].messages.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'stop, do X' }],
+    })
+    expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 0 }])
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it("treats the Anthropic SDK's APIUserAbortError, whose name is plain Error, as the interrupt", async () => {
+    const channel = createTurnInputChannel()
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const { provider, calls } = stepwiseProvider(async function* (o, i) {
+        if (i === 0) {
+          channel.push('stop, do X')
+          // What `messages.create` throws when its signal fires before the
+          // response arrives. Nothing has been yielded yet.
+          expect(o.signal!.aborted).toBe(true)
+          const err = new APIUserAbortError()
+          expect(err.name).not.toBe('AbortError')
+          throw err
+        }
+        yield* textStep('done')
+      })
+      const { events, result } = await runSteered(provider, channel)
+
+      expect(calls).toHaveLength(2)
+      expect(calls[1].messages).toHaveLength(2)
+      expect(calls[1].messages.at(-1)).toEqual({
+        role: 'user',
+        content: [{ type: 'text', text: 'stop, do X' }],
+      })
+      expect(result.turn.error).toBeUndefined()
+      expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 0 }])
+      expect(events.filter((e) => e.kind === 'error')).toEqual([])
+      // Not surfaced, but not silent either.
+      expect(debug).toHaveBeenCalledWith(expect.stringMatching(/step 0 interrupted.*Request was aborted/))
+    } finally {
+      debug.mockRestore()
+    }
+  })
+
+  it('closes a vendor-run tool row the interrupt cut off, and persists no server blocks from that step', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Searching. ' }
+        yield {
+          kind: 'server_tool_use',
+          id: 'srv_1',
+          name: 'web_search',
+          input: { query: 'vue sidebar' },
+        }
+        // The search is still running when the steer lands.
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+
+    expect(calls).toHaveLength(2)
+    expect(events.filter((e) => e.kind === 'tool_result')).toEqual([
+      {
+        kind: 'tool_result',
+        turnId: expect.any(String),
+        toolUseId: 'srv_1',
+        ok: false,
+        error: 'interrupted before the result arrived',
+      },
+    ])
+    // The reload will not show the row: nothing from that step's vendor
+    // blocks is persisted or sent back. Recorded as a known divergence.
+    expect(JSON.stringify(result.turn.assistantContent)).not.toContain('srv_1')
+    expect(JSON.stringify(calls[1].messages)).not.toContain('srv_1')
+    expect(result.turn.assistantContent).toEqual([
+      { type: 'text', text: 'Searching. ' },
+      { type: 'text', text: 'done' },
+    ])
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it('drops whitespace-only partial text, which Anthropic refuses as a text block', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: '\n  ' }
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { result } = await runSteered(provider, channel)
+    expect(calls[1].messages).toHaveLength(2)
+    expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 0 }])
+    expect(result.turn.assistantContent).toEqual([{ type: 'text', text: 'done' }])
+  })
+
+  it('shows no tool row for a step that ended without completing its message', async () => {
+    const { events, result } = await run([
+      [{ kind: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } }],
+    ])
+    expect(result.turn.error).toMatch(/without completing a message/)
+    expect(events.filter((e) => e.kind === 'tool_use_start')).toEqual([])
+  })
+
+  it.each([
+    ['text', { kind: 'text_delta', delta: 'and after that I will ' }],
+    ['reasoning', { kind: 'reasoning_delta', delta: 'hmm' }],
+  ] as const)(
+    'closes the row of a call that later %s had already shown, when the steer then drops the call',
+    async (_label, after) => {
+      const channel = createTurnInputChannel()
+      const write = { file_path: 'src/Late.vue', content: 'nope\n' }
+      const { provider, calls } = stepwiseProvider(async function* (o, i) {
+        if (i === 0) {
+          yield { kind: 'tool_use', id: 'tu_1', name: 'Write', input: write }
+          // A content frame after the call releases its held start frame.
+          yield after
+          channel.push('stop, do X')
+          await abortedBy(o.signal!)
+        }
+        yield* textStep('done')
+      })
+      const { events, result } = await runSteered(provider, channel)
+
+      // The call is dropped unrun, from history and from the persisted turn.
+      expect(existsSync(join(root, 'src/Late.vue'))).toBe(false)
+      expect(JSON.stringify(calls[1].messages)).not.toContain('tu_1')
+      expect(JSON.stringify(result.turn.assistantContent)).not.toContain('tu_1')
+      // The row the client already drew is closed, as a failure, exactly once.
+      expect(events.filter((e) => e.kind === 'tool_use_start')).toHaveLength(1)
+      expect(events.filter((e) => e.kind === 'tool_result')).toEqual([
+        {
+          kind: 'tool_result',
+          turnId: expect.any(String),
+          toolUseId: 'tu_1',
+          ok: false,
+          error: 'interrupted before this call ran',
+        },
+      ])
+    },
+  )
+
+  it('does not interrupt a tool that is running: the steer waits for the step boundary', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = scriptedProvider([
+      toolStep('tu_1', 'Read', { file_path: 'src/App.vue' }),
+      textStep('done'),
+    ])
+    const { result } = await runSteered(provider, channel, {
+      emit: (e: ChatStreamEvent) => {
+        // The tool is about to run: the provider call for this step is over.
+        if (e.kind === 'tool_use_start') channel.push('stop, do X')
+      },
+    })
+    expect(calls).toHaveLength(2)
+    expect(result.turn.toolResults.tu_1).toMatchObject({ ok: true })
+    expect(calls[1].messages.at(-1)).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: 'stop, do X' }],
+    })
+    expect(result.turn.steers).toEqual([{ text: 'stop, do X', afterAssistantBlocks: 1 }])
+  })
+})
+
+/**
  * FX11 item 2 (2026-09-05). The read baseline that `detectOverwriteConflict`
  * compares against used to advance in the permission gate, the moment the gate
  * ALLOWED a write. On this lane the gate's ack is a no-op stub and the write
@@ -964,6 +1922,152 @@ describe('runChatTurnNeutral: steering', () => {
  * path. This pins the property that move must not break: the agent's own
  * consecutive writes, with no Read in between, still raise no warning.
  */
+/**
+ * The AI SDK transport's abort shape: the stream is cut before the vendor's
+ * `finish` part, so the provider has no usage figure and reports 0/0. The
+ * vendor still billed the request.
+ */
+function* aiSdkAbortTail(text: string): Generator<ProviderEvent> {
+  yield { kind: 'usage', inputTokens: 0, outputTokens: 0 }
+  yield {
+    kind: 'message_complete',
+    stopReason: 'error',
+    vendorStopReason: 'aborted',
+    message: { role: 'assistant', content: text ? [{ type: 'text', text }] : [] },
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }
+}
+
+describe('runChatTurnNeutral: a cut-off step whose usage the transport never reported', () => {
+  const estimatedFrames = (events: ChatStreamEvent[]) =>
+    events.filter((e) => e.kind === 'usage' && e.estimated === true)
+
+  it('records an estimate for a steer-interrupted first step, flagged as estimated', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Hello there' }
+        channel.push('stop, do X')
+        yield* aiSdkAbortTail('Hello there')
+        return
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel, {
+      model: 'gpt-5.6',
+      providerId: 'openai',
+    })
+
+    const frames = estimatedFrames(events)
+    expect(frames).toHaveLength(1)
+    const frame = frames[0] as Extract<ChatStreamEvent, { kind: 'usage' }>
+    // Step 0 has no earlier step to copy, so the input is the request's size
+    // in characters over four.
+    const first = calls[0]
+    const requestChars = JSON.stringify({
+      system: first.system,
+      messages: first.messages,
+      tools: first.tools,
+    }).length
+    expect(frame.inputTokens).toBe(Math.ceil(requestChars / 4))
+    expect(frame.inputTokens).toBeGreaterThan(100)
+    // 'Hello there' is 11 characters.
+    expect(frame.outputTokens).toBe(3)
+    expect(result.turn.usage).toEqual({
+      inputTokens: frame.inputTokens + 10,
+      outputTokens: 5,
+      estimated: true,
+    })
+    // The estimate reaches the cost figure, not only the token count.
+    expect(result.turn.costUsd).toBeGreaterThan(0.001)
+  })
+
+  it("estimates a later step's input from the previous completed step, cache included", async () => {
+    const channel = createTurnInputChannel()
+    const { provider } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        yield { kind: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } }
+        yield {
+          kind: 'message_complete',
+          stopReason: 'tool_use',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } }],
+          },
+          usage: { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 4000 },
+        }
+        return
+      }
+      if (i === 1) {
+        yield { kind: 'text_delta', delta: 'Reading' }
+        channel.push('stop, do X')
+        yield* aiSdkAbortTail('Reading')
+        return
+      }
+      yield* textStep('done')
+    })
+    const { events } = await runSteered(provider, channel, { model: 'gpt-5.6', providerId: 'openai' })
+    const frames = estimatedFrames(events)
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ inputTokens: 4500, outputTokens: 2, estimated: true })
+  })
+
+  it('records an estimate for a step the user stopped on the AI SDK transport', async () => {
+    const controller = new AbortController()
+    const { provider } = stepwiseProvider(async function* () {
+      yield { kind: 'text_delta', delta: 'Partial answer' }
+      controller.abort()
+      yield* aiSdkAbortTail('Partial answer')
+    })
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      minimalOpts({
+        signal: controller.signal,
+        model: 'gpt-5.6',
+        providerId: 'openai',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      }) as never,
+      { buildProvider: () => provider },
+    )
+    expect(result.turn.error).toBe('turn aborted')
+    const frames = estimatedFrames(events)
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ outputTokens: 4, estimated: true })
+    expect(result.turn.usage?.estimated).toBe(true)
+    expect(result.turn.usage?.inputTokens).toBeGreaterThan(100)
+  })
+
+  it('does not estimate when the transport reported the usage itself', async () => {
+    const channel = createTurnInputChannel()
+    const { provider } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Hel' }
+        channel.push('stop, do X')
+        yield* adapterAbortTail([], { streamsUsage: false })
+        return
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+    expect(estimatedFrames(events)).toEqual([])
+    expect(result.turn.usage).toEqual({ inputTokens: 13, outputTokens: 3 })
+  })
+
+  it('does not estimate a step that was cut off before anything came back', async () => {
+    const channel = createTurnInputChannel()
+    const { provider } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+    expect(estimatedFrames(events)).toEqual([])
+    expect(result.turn.usage).toEqual({ inputTokens: 10, outputTokens: 2 })
+  })
+})
+
 describe('the read baseline on the neutral lane', () => {
   it('does not warn about the agent overwriting its own write', async () => {
     const { events } = await run([
@@ -1325,5 +2429,243 @@ describe('stopping a turn', () => {
     )
     expect(readFileSync(target, 'utf8')).toBe(before)
     expect(result.turn.toolResults?.tu_1?.ok).toBe(false)
+  })
+})
+
+describe('MCP servers on the neutral lane (Figma, .mcp.json)', () => {
+  // `__dirname`, not `import.meta.url`: this file runs under jsdom, whose
+  // `URL` is not the one `fileURLToPath` accepts.
+  const FIXTURE = join(__dirname, '__fixtures__', 'echo-mcp-server.mjs')
+  const echoServer = { command: process.execPath, args: [FIXTURE] }
+  const echoExtension = (allowedToolPrefixes: string[] | null, env?: Record<string, string>) => ({
+    id: 'echo',
+    mcpServer: { ...echoServer, ...(env ? { env } : {}) },
+    allowedToolPrefixes,
+  })
+
+  it("offers a connected server's tools to the model under mcp__<id>__, with the server's schema", async () => {
+    const { calls } = await run([textStep('ok')], { extensions: [echoExtension(null)] })
+    const echo = calls[0]!.tools!.find((t) => 'name' in t && t.name === 'mcp__echo__echo') as
+      | { inputSchema: Record<string, unknown> }
+      | undefined
+    expect(echo).toBeDefined()
+    expect(echo!.inputSchema).toMatchObject({
+      type: 'object',
+      properties: { text: { type: 'string' } },
+      required: ['text'],
+    })
+    // The editor tools are still there alongside it.
+    expect(calls[0]!.tools!.some((t) => 'name' in t && t.name === 'mcp__editor__get_selection')).toBe(
+      true,
+    )
+  })
+
+  it('runs an allowed call through the server and hands the model its arguments unstripped', async () => {
+    // `z.object({})` would strip `text`, and the fixture would then echo
+    // nothing. The echoed text proves the loop passed the input through.
+    const { events, result } = await run(
+      [toolStep('tu_1', 'mcp__echo__echo', { text: 'hi there' }), textStep('done')],
+      { extensions: [echoExtension(null)] },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; output: unknown }
+    expect(res.ok).toBe(true)
+    expect(JSON.stringify(res.output)).toContain('hi there')
+    expect(result.turn.error).toBeUndefined()
+  })
+
+  it("applies the extension's read-only prefix policy, the same gate the SDK lane uses", async () => {
+    const { events } = await run(
+      [toolStep('tu_1', 'mcp__echo__echo', { text: 'hi' }), textStep('ok')],
+      { extensions: [echoExtension(['get_'])] },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/read-only by contract/)
+  })
+
+  it('serves the legacy figma block under mcp__figma__, gated by its own prefixes, with the Figma prompt block', async () => {
+    const { FIGMA_APPEND_BLOCK } = await import('../agent-chat/system-prompt')
+    const { events, calls } = await run(
+      [toolStep('tu_1', 'mcp__figma__echo', { text: 'frame' }), textStep('ok')],
+      { figmaConfig: { mcpServer: echoServer, allowedToolPrefixes: ['echo'] } },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; output: unknown }
+    expect(res.ok).toBe(true)
+    expect(JSON.stringify(res.output)).toContain('frame')
+    expect((calls[0]!.system as TextBlock[])[0]!.text).toContain(FIGMA_APPEND_BLOCK)
+  })
+
+  it('reports a server-side tool failure to the model as an isError result', async () => {
+    const { events } = await run(
+      [toolStep('tu_1', 'mcp__echo__fail', {}), textStep('ok')],
+      { extensions: [echoExtension(null)] },
+    )
+    const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toContain('fixture failure')
+  })
+
+  it('removes a disallowed MCP tool by full name, as the SDK option does', async () => {
+    const { calls } = await run([textStep('ok')], {
+      extensions: [echoExtension(null)],
+      disallowedTools: ['mcp__echo__fail'],
+    })
+    const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+    expect(names).toContain('mcp__echo__echo')
+    expect(names).not.toContain('mcp__echo__fail')
+  })
+
+  it('finishes the turn without the server when it cannot start, and says so in the prompt', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { events, calls, result } = await run([textStep('ok')], {
+        extensions: [
+          { id: 'ghost', mcpServer: { command: '/nonexistent-binary' }, allowedToolPrefixes: null },
+          echoExtension(null),
+        ],
+        disabledCapabilities: '# Off right now\nNothing.',
+      })
+      expect(events.some((e) => e.kind === 'error')).toBe(false)
+      expect(result.turn.error).toBeUndefined()
+      const text = (calls[0]!.system as TextBlock[])[0]!.text
+      const notice =
+        'The MCP server "ghost" could not be started this turn, so its tools are unavailable.'
+      expect(text).toContain(notice)
+      // After disabledCapabilities, the prompt's last section.
+      expect(text.indexOf(notice)).toBeGreaterThan(text.indexOf('# Off right now'))
+      // The server that did start is still offered.
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names).toContain('mcp__echo__echo')
+      expect(names.some((n) => n.startsWith('mcp__ghost__'))).toBe(false)
+      // One warning for the failed server. (The fixture's `dotted.name` tool
+      // raises a separate one of its own.)
+      const ghostWarnings = warn.mock.calls.filter((c) => String(c[0]).includes('"ghost"'))
+      expect(ghostWarnings).toHaveLength(1)
+      expect(String(ghostWarnings[0]![0])).toMatch(/could not start MCP server "ghost"/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('refuses an id that would split inside mcp__<id>__<tool>, so its tools never appear', async () => {
+    // `editor__x` would name its tools `mcp__editor__x__<tool>`, which the
+    // gate reads as the built-in editor namespace and allows outright,
+    // whatever `allowedToolPrefixes` says. The loader refuses such an id;
+    // this is the runtime's own guard for a config that did not come
+    // through it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { events, calls, result } = await run(
+        [toolStep('tu_1', 'mcp__editor__x__echo', { text: 'hi' }), textStep('ok')],
+        {
+          extensions: [
+            { id: 'editor__x', mcpServer: echoServer, allowedToolPrefixes: ['get_'] },
+          ],
+        },
+      )
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names.some((n) => n.includes('editor__x'))).toBe(false)
+      const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; error: string }
+      expect(res.ok).toBe(false)
+      expect(res.error).toMatch(/no tool named 'mcp__editor__x__echo'/)
+      expect((calls[0]!.system as TextBlock[])[0]!.text).toContain(
+        'The MCP server "editor__x" could not be started this turn, so its tools are unavailable.',
+      )
+      expect(result.turn.error).toBeUndefined()
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/"editor__x": its id is not allowed/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('refuses the reserved id `editor`, so a server cannot take over the built-in tool namespace', async () => {
+    // `editor` passes the character rule, but its tools would be named
+    // `mcp__editor__<tool>`: the gate treats that namespace as first-party
+    // and never applies the server's own read-only policy. The loader
+    // refuses the id; this is the runtime's guard for a config that did not
+    // come through it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { calls, result } = await run([textStep('ok')], {
+        extensions: [{ id: 'editor', mcpServer: echoServer, allowedToolPrefixes: ['echo'] }],
+      })
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names).not.toContain('mcp__editor__echo')
+      expect(names).not.toContain('mcp__editor__fail')
+      expect((calls[0]!.system as TextBlock[])[0]!.text).toContain(
+        'The MCP server "editor" could not be started this turn, so its tools are unavailable.',
+      )
+      expect(result.turn.error).toBeUndefined()
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/"editor": its id is reserved/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('starts an id with a single inner underscore, and refuses one with a leading or trailing underscore', async () => {
+    // `x_` would name its tools `mcp__x___echo`, which the gate reads as id
+    // `x`. `my_server` cannot be misread: a single `_` never forms `__`.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { events, calls, result } = await run(
+        [toolStep('tu_1', 'mcp__my_server__echo', { text: 'underscored' }), textStep('ok')],
+        {
+          extensions: [
+            { id: 'my_server', mcpServer: echoServer, allowedToolPrefixes: null },
+            { id: '_x', mcpServer: echoServer, allowedToolPrefixes: null },
+            { id: 'x_', mcpServer: echoServer, allowedToolPrefixes: null },
+          ],
+        },
+      )
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names).toContain('mcp__my_server__echo')
+      expect(names.some((n) => n.startsWith('mcp___x') || n.startsWith('mcp__x_'))).toBe(false)
+      const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; output: unknown }
+      expect(res.ok).toBe(true)
+      expect(JSON.stringify(res.output)).toContain('underscored')
+      const text = (calls[0]!.system as TextBlock[])[0]!.text
+      for (const id of ['_x', 'x_']) {
+        expect(text).toContain(
+          `The MCP server "${id}" could not be started this turn, so its tools are unavailable.`,
+        )
+      }
+      expect(text).not.toContain('The MCP server "my_server"')
+      expect(result.turn.error).toBeUndefined()
+      const refused = warn.mock.calls.filter((c) => /its id is not allowed/.test(String(c[0])))
+      expect(refused).toHaveLength(2)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('leaves the prompt unchanged when no MCP server is configured', async () => {
+    const plain = await run([textStep('ok')])
+    const withNone = await run([textStep('ok')], { extensions: [] })
+    expect((withNone.calls[0]!.system as TextBlock[])[0]!.text).toBe(
+      (plain.calls[0]!.system as TextBlock[])[0]!.text,
+    )
+  })
+
+  it('stops the server once the turn is over', async () => {
+    const pidFile = join(root, 'echo.pid')
+    await run([textStep('ok')], {
+      extensions: [echoExtension(null, { ECHO_MCP_PIDFILE: pidFile })],
+    })
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    expect(pid).toBeGreaterThan(0)
+    // Polled: `close()` stops waiting after 1.5s while the SDK's own
+    // SIGTERM/SIGKILL escalation carries on, so on a loaded machine the child
+    // can outlive the turn by a moment.
+    const alive = (): boolean => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const until = Date.now() + 5_000
+    while (alive() && Date.now() < until) await new Promise((r) => setTimeout(r, 50))
+    expect(alive()).toBe(false)
   })
 })

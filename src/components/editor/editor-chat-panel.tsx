@@ -150,8 +150,8 @@ function EditorChatPanelImpl({
   // panel's own fetch is not wanted here; we only need the action.
   const { enable: enableCapability } = useEditorCapabilities(false)
 
-  // Fetch model catalog to get the active provider's capabilities
-  const [catalog, setCatalog] = useState<Array<{ providerId: string; capabilities?: { vendorRateLimitEvents?: boolean } }> | null>(null)
+  // Fetch model catalog to get the active provider's capabilities and label
+  const [catalog, setCatalog] = useState<Array<{ providerId: string; label?: string; capabilities?: { vendorRateLimitEvents?: boolean } }> | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -171,13 +171,15 @@ function EditorChatPanelImpl({
     }
   }, [])
 
-  // Extract vendorRateLimitEvents from the active provider's capabilities
-  // Defaults to true when catalog hasn't loaded yet (safe default)
-  const vendorRateLimitEvents = (() => {
-    if (!catalog || !chat.modelConfig) return true
-    const entry = catalog.find(c => c.providerId === chat.modelConfig!.provider)
-    return entry?.capabilities?.vendorRateLimitEvents ?? true
+  // Extract vendorRateLimitEvents and the display label from the active
+  // provider's catalog entry. Both default to the pre-catalog / Claude
+  // behaviour so a not-yet-loaded catalog does not change what renders.
+  const activeCatalogEntry = (() => {
+    if (!catalog || !chat.modelConfig) return undefined
+    return catalog.find((c) => c.providerId === chat.modelConfig!.provider)
   })()
+  const vendorRateLimitEvents = activeCatalogEntry?.capabilities?.vendorRateLimitEvents ?? true
+  const providerLabel = activeCatalogEntry?.label ?? "Claude"
 
 
   // Conversational messages (user + assistant) for the runtime.
@@ -242,6 +244,7 @@ function EditorChatPanelImpl({
             onDismiss={chat.dismissMessage}
             onEnableCapability={enableCapability}
             vendorRateLimitEvents={vendorRateLimitEvents}
+            providerLabel={providerLabel}
           />
           <ResendingSteerRows steers={chat.resendingSteers} />
 

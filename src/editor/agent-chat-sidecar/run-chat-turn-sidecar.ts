@@ -1,0 +1,1266 @@
+/**
+ * The Claude Agent SDK sidecar: one user turn through the local `claude`
+ * binary, so the person running Desde for themselves can spend their Claude
+ * subscription. Dev-only. The product's chat runtime is the neutral loop in
+ * `../agent-chat-neutral/run-chat-turn-neutral.ts`.
+ *
+ * The sidecar is deliberately thin. The SDK supplies the model loop, the
+ * transport and session resume. Desde supplies everything else, and it is the
+ * SAME everything else the neutral lane uses:
+ *
+ *  - Tools. The SDK's own built-ins are OFF except `WebFetch` and
+ *    `WebSearch`, the two that never touch the repository (`canUseTool` still
+ *    gates them by `webPolicy`). Desde's whole neutral tool catalog
+ *    (`buildNeutralToolCatalog`: its own `Read`, `Glob`, `Grep`, `TodoWrite`,
+ *    `Write`, `Edit`, plus every editor tool) is registered as the in-process
+ *    `editor` MCP server. Those built-ins journal, lock, snapshot, broker and
+ *    invalidate inside the tool, so this file needs none of the hooks it used
+ *    to wire around the SDK's own Read/Write/Edit.
+ *  - The system prompt. `buildNeutralSystemPrompt`, as a plain string. No
+ *    `claude_code` preset.
+ *  - The permission gate. `canUseTool` is `buildToolPermissionGate`, the
+ *    neutral lane's closure. Under `permissionMode: 'default'` the SDK fires
+ *    it for every MCP tool, Read included.
+ *
+ * **Naming difference from the neutral lane.** The SDK prefixes every tool on
+ * an MCP server with the server's namespace, and there is no way to register
+ * an MCP tool under a bare name. So the model's tool list here carries
+ * `mcp__editor__Read`, `mcp__editor__Write`, `mcp__editor__Edit`,
+ * `mcp__editor__Glob`, `mcp__editor__Grep` and `mcp__editor__TodoWrite`, where
+ * the neutral lane lists `Read`, `Write` and so on. Three things keep the
+ * shared prompt's bare names working:
+ *
+ *  - `toolAliases` maps each bare name to its namespaced tool, so a
+ *    model-emitted bare `Read` runs Desde's Read instead of failing as
+ *    unknown. It changes name lookup only, not the tool list.
+ *  - The six built-ins and `get_selection` register with `alwaysLoad`, so
+ *    they are in the turn-one tool list rather than deferred behind search.
+ *  - The permission gate matches both spellings (`bareToolName` in
+ *    `../agent-chat/edit-ack.ts`).
+ *
+ * MEASURED 2026-09-23 (`tasks/scripts/sidecar-read-naming-probe.mts`, Sonnet
+ * 4.6): asked to read a file, the model called `mcp__editor__Read` directly,
+ * with no refused attempt and no tool-search call, and `canUseTool` received
+ * `mcp__editor__Read`. Told three times to emit the bare `Read`, it still
+ * chose `mcp__editor__Read`, so the alias path itself was not exercised live.
+ * The SDK documents it as resolving the mapped name before execution; the
+ * gate decides both spellings identically either way.
+ *
+ * SDK session resume: the first turn captures `session_id` from the
+ * SDKSystemMessage init event; later turns pass it back via `options.resume`
+ * so the SDK rebuilds conversation state from its own JSONL store. Desde's
+ * session record links to it via `ChatSession.sdkSessionId`.
+ */
+
+import { randomUUID } from 'node:crypto'
+
+import { query } from '@anthropic-ai/claude-agent-sdk'
+
+import type { EditProposalPayload } from '../agent-tools/types'
+import {
+  claudeReauthMessage,
+  extractRetryAfterFromError,
+  isAuthError,
+} from '../agent-chat/classify-turn-error'
+import type {
+  ChatAssistantBlock,
+  ChatConflictRecord,
+  ChatFileReadRecord,
+  ChatPageSnapshot,
+  ChatSelectionSnapshot,
+  ChatSession,
+  ChatSteeredMessage,
+  ChatToolResult,
+  ChatTurn,
+} from '../agent-chat/types'
+import { computeSessionCost } from '../agent-chat/session-cost'
+
+import { runWithChatSession } from '../edit-service/chat-session-context'
+import { findRecentWriterForFile } from '../agent-chat/session-store'
+import { branchModeRootCommitSha } from '../worktree/git-branches'
+import { resolveClaudeOnPath, SIDECAR_NO_BINARY_MESSAGE } from './resolve-claude-on-path'
+// Re-exported below (not defined here, M1 / final-review-report.md): this
+// file imports the Agent SDK at module scope, and
+// `model-catalog-source.ts` (on the boot graph) needs this predicate
+// WITHOUT that import coming along for the ride.
+import {
+  resolveAnthropicThinkingConfig,
+  supportsAnthropicAdaptiveThinking,
+} from '../llm-providers/anthropic-adaptive-thinking'
+
+export { resolveAnthropicThinkingConfig, supportsAnthropicAdaptiveThinking }
+
+import { buildSidecarToolServer } from './editor-tool-server'
+import {
+  lookupRecentCrossSessionWriter,
+  recordCrossSessionWrite,
+} from '../agent-chat/cross-session-write-log'
+import type { OverwriteConflictDetected } from '../agent-chat/edit-ack'
+import { buildCanUseTool } from './can-use-tool'
+import { captureReadSnapshot } from '../agent-chat/file-read-snapshot'
+import { writeProposalBlob } from '../agent-chat/proposal-blob-store'
+import { createSdkEventAdapter } from './sdk-event-adapter'
+import { flattenSdkMessage } from './sdk-message-flatten'
+import { attachSteerReconciliation, createTurnInputChannel } from '../agent-chat/turn-input-channel'
+import { readAssistantMessageBoundaryId, toSdkPrompt } from './sdk-user-message'
+import { buildGroundingDigest } from '../agent-chat/grounding-tools'
+import { buildNeutralSystemPrompt } from '../agent-chat-neutral/system-prompt-neutral'
+import { buildNeutralToolCatalog } from '../agent-chat-neutral/tool-catalog'
+import type { RunChatTurnOpts, RunChatTurnResult } from '../agent-chat/run-chat-turn'
+
+/**
+ * The only SDK built-ins left on. Neither touches the repository, and
+ * `canUseTool` gates both by `webPolicy`. Every tool that does touch it is
+ * Desde's own, registered on the `editor` MCP server.
+ */
+const SIDECAR_SDK_BUILTINS = ['WebFetch', 'WebSearch'] as const
+
+/**
+ * Bare built-in name to the namespaced MCP tool that implements it on this
+ * lane. See `toolAliases` in the query options.
+ */
+const SIDECAR_TOOL_ALIASES: Record<string, string> = Object.fromEntries(
+  ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite'].map((n) => [n, `mcp__editor__${n}`]),
+)
+
+/** SDK default model when none is specified. Exported so the model
+ * catalog can assert it stays in sync (anthropic-model-catalog.test.ts). */
+export const DEFAULT_SDK_MODEL = 'claude-opus-4-8'
+
+/**
+ * Historical names. Kept as ALIASES, not copies, so the dozens of call sites
+ * that import them keep compiling and can never describe a different shape
+ * from the contract. `run-chat-turn.test.ts` asserts the two are exact.
+ */
+export type RunChatTurnSdkOpts = RunChatTurnOpts
+export type RunChatTurnSdkResult = RunChatTurnResult
+
+export async function runChatTurnSdk(
+  opts: RunChatTurnOpts,
+): Promise<RunChatTurnResult> {
+  // Phase 3 follow-up of tasks/editor-detached-sessions.md: scope
+  // every withWriteLock call made during this turn to the session
+  // so the FileLockManager's persistence sink routes events to
+  // <worktreeRoot>/.desde/chat-sessions/<sessionId>/lock-events.jsonl.
+  // Direct bridge mutations that fire DURING the turn inherit this scope
+  // and show up on the timeline. So do this lane's Write and Edit now: they
+  // are Desde's own tools and go through `brokeredWrite`, not the SDK's.
+  return runWithChatSession(
+    { sessionId: opts.session.id.sessionId, repoRoot: opts.worktreeRoot },
+    () => runChatTurnSdkInner(opts),
+  )
+}
+
+async function runChatTurnSdkInner(
+  opts: RunChatTurnOpts,
+): Promise<RunChatTurnResult> {
+  const turnId = randomUUID()
+  const startedAt = new Date().toISOString()
+  const model = opts.model ?? DEFAULT_SDK_MODEL
+
+  // ── Cost-ceiling pre-check ─────────────────────────────────────────
+  // Mirrors the legacy orchestrator's "refuse before starting" gate.
+  // For SDK turns we use the vendor-reported `costUsd` when present
+  // and fall back to the rate-card estimate for legacy turns and any
+  // SDK turn that didn't capture cost.
+  if (typeof opts.costCeilingUsd === 'number') {
+    const priorCost = computeSessionCost(opts.session)
+    if (priorCost >= opts.costCeilingUsd) {
+      const reason = `Session cost ceiling reached ($${priorCost.toFixed(2)} of $${opts.costCeilingUsd}). Start a new session or raise the ceiling.`
+      opts.emit({ kind: 'error', turnId, reason })
+      opts.emit({ kind: 'turn_complete', turnId, stopReason: 'error' })
+      const refusal: ChatTurn = {
+        id: turnId,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        userMessage: opts.userMessage,
+        selection: opts.selection,
+        page: opts.page,
+        assistantContent: [],
+        toolResults: {},
+        editProposals: [],
+        error: reason,
+        model,
+      }
+      return {
+        session: {
+          ...opts.session,
+          updatedAt: refusal.completedAt!,
+          turns: [...opts.session.turns, refusal],
+        },
+        turn: refusal,
+      }
+    }
+  }
+
+  // ── Edit-proposal plumbing ─────────────────────────────────────────
+  // ONE emit path, shared by every tool that proposes an edit: the built-in
+  // Write and Edit (which call it after `brokeredWrite` has put the bytes on
+  // disk, with `appliedByAgent: true` so the shell skips its own write),
+  // the structural write tools, and `propose_prop_edit` (no disk write; the
+  // shell applies it as a DOM overlay and acks). Same closure as the neutral
+  // lane: one turn's `editProposals` list, one `edit_proposed` shape, one ack
+  // round-trip.
+  //
+  // It used to be two. The SDK's own Write/Edit got a fire-and-forget emitter
+  // called from `canUseTool`, because the SDK owned the write syscall and the
+  // permission callback was the only place to see it. Those built-ins are off
+  // now, so that emitter had no caller left.
+  const editProposalRefs: ChatTurn['editProposals'] = []
+  const recordProposal = (editId: string, payload: EditProposalPayload): void => {
+    let kind: ChatTurn['editProposals'][number]['kind']
+    let files: string[] = []
+    switch (payload.type) {
+      case 'prop_edit':
+        kind = 'prop_edit'
+        break
+      case 'overwrite':
+        kind = 'overwrite'
+        files = [payload.file]
+        break
+      case 'file_delete':
+        kind = 'file_delete'
+        files = [payload.file]
+        break
+      case 'file_rename':
+        kind = 'file_rename'
+        files = [payload.fromFile, payload.toFile]
+        break
+    }
+    editProposalRefs.push({
+      editId,
+      kind,
+      files,
+      proposedAt: new Date().toISOString(),
+    })
+  }
+
+  const emitEditProposal = async (
+    payload: EditProposalPayload,
+  ): Promise<{ ok: true; editId: string } | { ok: false; reason: string }> => {
+    const editId = randomUUID()
+    // Phase 4 §4 of tasks/editor-detached-sessions.md — persist
+    // the proposed newSource to disk BEFORE the SSE event fires so
+    // a "Use mine" click in the save dialog can always recover the
+    // loser-session's intended content (the working tree carries
+    // only the last writer's output). The blob is keyed by editId
+    // which is also baked into the edit-proposal record persisted
+    // on the session, so the save dialog finds the right blob via
+    // a simple file read. See proposal-blob-store.ts.
+    //
+    // Best-effort: a blob-write failure is logged via console.warn
+    // but does NOT block the SSE emit — losing a blob means "Use
+    // mine" can't recover that specific edit; everything else
+    // still works (diff display, save dialog enumeration, etc.).
+    if (payload.type === 'overwrite' && typeof payload.newSource === 'string') {
+      try {
+        await writeProposalBlob(
+          opts.worktreeRoot,
+          opts.session.id.sessionId,
+          editId,
+          payload.newSource,
+        )
+      } catch (err) {
+        console.warn(
+          `[runChatTurnSdk] failed to persist proposal blob for editId=${editId}: ${
+            (err as Error).message
+          }`,
+        )
+      }
+    }
+    opts.emit({ kind: 'edit_proposed', turnId, editId, edit: payload })
+    if (opts.awaitEditAck) {
+      const ack = await opts.awaitEditAck(editId)
+      if (!ack.ok) return { ok: false, reason: ack.reason }
+    }
+    recordProposal(editId, payload)
+    return { ok: true, editId }
+  }
+
+  // ── Per-turn read/conflict state ───────────────────────────────────
+  // Phase 4a §2 — per-turn fileReads accumulator. Seeded from any
+  // pre-existing session.fileReads so a prior turn's Reads still count
+  // as the base for this turn's Writes. Filled by the Read tool's
+  // `onFileRead` and advanced by the write tools' `recordOwnWrite`.
+  const fileReads: Record<string, ChatFileReadRecord> = {
+    ...(opts.session.fileReads ?? {}),
+  }
+  // Conflicts detected during this turn. Phase 4a §1.
+  const conflicts: Record<string, ChatConflictRecord> = {
+    ...(opts.session.conflicts ?? {}),
+  }
+
+  /**
+   * Raised by the write tools themselves, against the bytes they actually
+   * replaced (FX14 item 2, see `reportOverwriteConflict` in
+   * `builtin-edit.ts`). Not by the permission gate: the gate runs before the
+   * tool's own read, so a writer landing in between would escape it.
+   */
+  const onConflictDetected = async (
+    detected: OverwriteConflictDetected,
+  ): Promise<void> => {
+    conflicts[detected.absolutePath] = {
+      detectedAt: new Date().toISOString(),
+      hashAtRead: detected.hashAtRead,
+      hashAtWrite: detected.hashAtWrite,
+    }
+    // Look up which OTHER chat session most recently touched this
+    // file so the chat banner can name the conflicting session.
+    //
+    // Two-tier lookup:
+    //   1. In-memory cross-session write log (PR3) — catches the case
+    //      we actually care about: another chat session is mid-stream,
+    //      its write just landed, and its turn hasn't finished
+    //      `saveSession`'ing. The persisted scan misses this.
+    //   2. Persisted scan (PR2) — falls back when the log is empty
+    //      (process restart since the conflicting write, or the
+    //      writer's process was different — though in practice all
+    //      chat sessions in one edit session share a process).
+    //
+    // Either result is decorative; a `null` outcome just means the
+    // banner fires without naming the conflicting session.
+    let attribution:
+      | { sessionId: string; firstUserMessagePreview?: string }
+      | null = null
+    try {
+      const live = lookupRecentCrossSessionWriter(
+        detected.absolutePath,
+        opts.session.id.sessionId,
+      )
+      if (live) {
+        attribution = {
+          sessionId: live.sessionId,
+          ...(live.firstUserMessagePreview
+            ? { firstUserMessagePreview: live.firstUserMessagePreview }
+            : {}),
+        }
+      } else {
+        attribution = await findRecentWriterForFile(
+          opts.worktreeRoot,
+          opts.session.id.sessionId,
+          detected.file,
+        )
+      }
+    } catch {
+      // Attribution is decorative; never block the warning on a
+      // failed lookup.
+    }
+    opts.emit({
+      kind: 'edit_overwrite_warning',
+      turnId,
+      file: detected.file,
+      hashAtRead: detected.hashAtRead,
+      hashAtWrite: detected.hashAtWrite,
+      ...(attribution
+        ? {
+            conflictingSessionId: attribution.sessionId,
+            ...(attribution.firstUserMessagePreview
+              ? { conflictingSessionPrompt: attribution.firstUserMessagePreview }
+              : {}),
+          }
+        : {}),
+    })
+  }
+
+  // ── Tools ──────────────────────────────────────────────────────────
+  // Branch mode has no pinned worktree-session base commit, so
+  // `session_status`/`session_diff` ("what have I changed?") resolve
+  // against the merge-base with the default branch instead — recomputed
+  // fresh each turn since the user can switch branches between turns.
+  // Undefined (no default branch, detached HEAD, git error) leaves those
+  // tools registered but refusing with their existing "not configured"
+  // error rather than a wrong answer.
+  const rootCommitSha = (await branchModeRootCommitSha(opts.worktreeRoot)) ?? undefined
+
+  // The neutral lane's catalog, built the way the neutral lane builds it. See
+  // `run-chat-turn-neutral.ts` for the reasoning behind each option; the
+  // comments here only note where this lane differs.
+  const catalog = buildNeutralToolCatalog({
+    worktreeRoot: opts.worktreeRoot,
+    onFileRead: async (r) => {
+      // The read-time base, so `resolve-conflict.ts` has something to merge
+      // against. Recorded only when the snapshot describes the same bytes
+      // the tool returned to the model.
+      const snapshot = await captureReadSnapshot(r.repoRel, {
+        worktreeRoot: opts.worktreeRoot,
+        sessionId: opts.session.id.sessionId,
+      })
+      fileReads[r.absolutePath] = {
+        hashAtRead: r.hashAtRead,
+        baseContentPath:
+          snapshot !== null && snapshot.hashAtRead === r.hashAtRead
+            ? snapshot.baseContentPath
+            : '',
+        readAt: r.readAt,
+      }
+    },
+    writeToolsEnabled: true,
+    writeOpts: {
+      worktreeRoot: opts.worktreeRoot,
+      emitEdit: emitEditProposal,
+      getFileReads: () => fileReads,
+      onConflictDetected,
+      // Advance the baseline once the bytes are on disk (FX11 item 2), so a
+      // later same-session write isn't false-flagged against our own write.
+      //
+      // Differs from the neutral lane: also record the write in the
+      // process-global cross-session log (PR3), so OTHER concurrent sessions
+      // can name this one in their conflict banner before our turn persists.
+      recordOwnWrite: (absPath: string, nextHash: string) => {
+        fileReads[absPath] = {
+          hashAtRead: nextHash,
+          baseContentPath: fileReads[absPath]?.baseContentPath ?? '',
+          readAt: new Date().toISOString(),
+        }
+        // Mirror the "first user message" semantic of
+        // `findRecentWriterForFile` so the in-memory log's attribution
+        // looks identical to the persisted-scan path. On the FIRST
+        // turn `opts.session.turns` is empty (the current turn hasn't
+        // been appended yet), so fall back to `opts.userMessage`
+        // — that's what will become `turns[0]` once the turn persists.
+        const firstUserMessageRaw =
+          typeof opts.session.turns[0]?.userMessage === 'string'
+            ? opts.session.turns[0].userMessage
+            : opts.userMessage
+        const firstUserMessage = firstUserMessageRaw
+          ? firstUserMessageRaw.slice(0, 60)
+          : undefined
+        recordCrossSessionWrite(absPath, {
+          sessionId: opts.session.id.sessionId,
+          ...(firstUserMessage ? { firstUserMessagePreview: firstUserMessage } : {}),
+          at: new Date().toISOString(),
+        })
+      },
+      ...(opts.invalidateFiles ? { invalidateFiles: opts.invalidateFiles } : {}),
+      ...(opts.acquireTreeGate ? { acquireTreeGate: opts.acquireTreeGate } : {}),
+      ...(opts.recordHistory !== undefined ? { recordHistory: opts.recordHistory } : {}),
+      // `acquireWriteLock` is NOT threaded, for the neutral lane's reason:
+      // `brokeredWrite` takes its own per-path lock, and taking the CLI's
+      // file lock on top of the shared tree gate can deadlock against a
+      // pending Commit or Publish. It was only ever needed while the SDK
+      // owned the write syscall.
+    },
+    editorToolOpts: {
+      bridge: opts.bridge,
+      signal: opts.signal,
+      emitEdit: emitEditProposal,
+      readRoots: opts.readRoots,
+      rootCommitSha,
+      verificationAdapter: opts.verificationAdapter,
+      worktreeRoot: opts.worktreeRoot,
+      invalidateFiles: opts.invalidateFiles,
+      // download_asset reuses the WebFetch host allowlist — same trust
+      // boundary, deliberately not a wider one.
+      ...(opts.webPolicy ? { webPolicy: opts.webPolicy } : {}),
+      packageManagerAdapter: opts.packageManagerAdapter,
+      getGrounding: opts.getGrounding,
+      reviewSurface: opts.reviewSurface,
+      // `verify_goal`'s translate step. Pass-through only; this runtime
+      // never calls it itself.
+      resolveLlmProvider: opts.resolveLlmProvider,
+      canvasEnabled: opts.canvasEnabled,
+      acquireTreeGate: opts.acquireTreeGate,
+      // The tool-side half of the secret-read policy: `rename_file`'s
+      // source check (FX17 item 5), and the resolved-path filters in
+      // `search_external_files` and `session_diff` (FX20 item 1).
+      ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
+    },
+    ...(opts.builtinTools ? { builtinTools: opts.builtinTools } : {}),
+    ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
+    // Secret-file reads. Passed to the TOOLS as well as to the gate below:
+    // the gate is the policy, and the tool is the code that opens the file.
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
+  })
+  const editorToolServer = buildSidecarToolServer(catalog, opts.signal)
+
+  // The SDK built-ins still on: the web pair, narrowed by the caller's own
+  // built-in list when it passes one (the edit-fix mini-turn names neither).
+  const sdkBuiltins = SIDECAR_SDK_BUILTINS.filter(
+    (name) => opts.builtinTools === undefined || opts.builtinTools.includes(name),
+  )
+
+  // The neutral lane's gate, configured the way the neutral lane configures
+  // it. It never emits and never detects conflicts: on this lane, as there,
+  // the write tools call `brokeredWrite`, whose `emit` is the single source of
+  // `edit_proposed` and which reports conflicts against the bytes it
+  // replaced. A second emit here would double every diff card.
+  const canUseTool = buildCanUseTool({
+    worktreeRoot: opts.worktreeRoot,
+    emitEditProposal: async () => ({ ok: true, editId: '' }),
+    readRoots: opts.readRoots,
+    webPolicy: opts.webPolicy,
+    ...(opts.blockSecretReads === true ? { blockSecretReads: true } : {}),
+    figmaAllowedToolPrefixes: opts.figmaConfig?.allowedToolPrefixes,
+    // Per-extension read-only policy, keyed by MCP namespace id. Built from
+    // the SAME list that gets registered below, so a server can never be
+    // reachable without a policy governing it.
+    extensionToolPolicy: new Map(
+      (opts.extensions ?? []).map((e) => [e.id, e.allowedToolPrefixes]),
+    ),
+  })
+
+  // Per-session design-system discovery digest (component names + token
+  // categories). Best-effort + byte-stable; the grounding sources are memoized
+  // so this is ~instant after the first build. Computed before the prompt so it
+  // can be injected as cache-stable context.
+  const groundingDigest = opts.getGrounding
+    ? await buildGroundingDigest(opts.getGrounding)
+    : null
+  // The web built-ins this turn can actually use: on in `tools` AND turned on
+  // by the project's web policy. The prompt describes only these, because its
+  // web section says "the user turned these on". The rest stay in `tools` and
+  // `canUseTool` refuses them with a message naming the config key.
+  const enabledWebBuiltins = sdkBuiltins.filter((name) =>
+    name === 'WebFetch'
+      ? (opts.webPolicy?.webFetchAllowedHosts.length ?? 0) > 0
+      : opts.webPolicy?.webSearchEnabled === true,
+  )
+  // The neutral lane's prompt, as a plain string: no `claude_code` preset.
+  const systemPrompt = buildNeutralSystemPrompt({
+    // The `claude` binary delivers a mid-turn message wrapped in a
+    // <system-reminder>; the default wording would call that channel
+    // untrusted. See `SDK_REMINDER_STEERING_BLOCK`.
+    steering: 'sdk-reminder',
+    // The SDK's own WebFetch/WebSearch, by those names, not the provider
+    // server tools the neutral loop declares.
+    ...(enabledWebBuiltins.length > 0
+      ? { webTools: { style: 'builtin' as const, names: enabledWebBuiltins } }
+      : {}),
+    writeToolsEnabled: catalog.some((spec) => spec.name === 'Write'),
+    groundingEnabled: opts.getGrounding !== undefined,
+    ...(groundingDigest ? { groundingDigest } : {}),
+    canvasEnabled: opts.canvasEnabled === true,
+    blockSecretReads: opts.blockSecretReads === true,
+    ...(opts.projectKnowledge ? { projectKnowledge: opts.projectKnowledge } : {}),
+    disabledCapabilities: opts.disabledCapabilities ?? null,
+    // The legacy `figma` block OR a `figma` server declared in `.mcp.json`:
+    // both are registered below, so both get the prompt section.
+    figmaEnabled:
+      opts.figmaConfig !== undefined ||
+      (opts.extensions ?? []).some((e) => e.id === 'figma'),
+  })
+
+  const userMessageWithContext = buildUserMessageWithContext(
+    opts.userMessage,
+    opts.selection,
+    opts.page,
+  )
+
+  // Declared here rather than with the rest of the turn-execution state below
+  // because the channel's accept hook stamps a steer's position against its
+  // current length, and a closure over a not-yet-declared const would be a
+  // trap waiting for the first steer that arrives early.
+  const assistantContent: ChatAssistantBlock[] = []
+
+  // The assistant message currently STREAMING, which `assistantContent` cannot
+  // see: blocks only land there when a COMPLETE `assistant` message is
+  // flattened, so for the whole body of a long reply the persisted list lags
+  // what the user is reading by that entire message.
+  //
+  // Stamping a steer against `assistantContent.length` alone therefore recorded
+  // it as sitting BEFORE text the user had already watched stream in above
+  // their own bubble. Live the bubble sat under that text; after a reload it
+  // jumped above it. That is the same live-versus-hydrated disagreement this
+  // feature already fixed once, surviving in a narrower window.
+  //
+  // `streamedText` is what the client has on screen for that message;
+  // `committedStreamedChars` is how much of it a steer split has already
+  // written into `assistantContent`.
+  let streamedText = ''
+  let committedStreamedChars = 0
+  const resetStreamedText = (): void => {
+    streamedText = ''
+    committedStreamedChars = 0
+  }
+  /**
+   * Close off the part of the in-flight message the user has already seen, as
+   * its own block, so `assistantContent.length` IS the position the live
+   * renderer used at this instant.
+   *
+   * The split is real rather than bookkeeping: the client cut its assistant
+   * bubble at exactly this character, because it had received exactly these
+   * deltas when the `steered` frame landed on the same stream. A transcript
+   * that did not carry the same cut could not reproduce that reading.
+   */
+  const commitStreamedPrefix = (): void => {
+    const pending = streamedText.slice(committedStreamedChars)
+    if (pending.length === 0) return
+    assistantContent.push({ type: 'text', text: pending })
+    committedStreamedChars = streamedText.length
+  }
+
+  // Every steer this turn accepted, in accept order, in the shape the persisted
+  // transcript needs. Filled from the channel's accept hook — the same accepted
+  // -steer bookkeeping the undelivered-steer reconciliation reads, not a second
+  // list of our own — because `turn.userMessage` holds the OPENING prompt only.
+  // Without this the model's answer to a steered message survives a re-hydrate
+  // and the user's question does not.
+  const steerRecords: ChatSteeredMessage[] = []
+
+  // The turn's input channel — see `turn-input-channel.ts`. It carries the
+  // initial user message and stays open so a message typed mid-turn reaches the
+  // model at the next model boundary. Resolved BEFORE the try block so the
+  // finally below can always close it. The caller normally supplies it, already
+  // registered as steerable — see `inputChannel` for why that direction.
+  const turnChannel = opts.inputChannel ?? createTurnInputChannel()
+  turnChannel.begin(
+    {
+      text: userMessageWithContext,
+      ...(opts.images?.length ? { images: opts.images } : {}),
+    },
+    {
+      onAccepted: (steer) => {
+        // FIRST, so the reply-in-progress is cut where the user actually
+        // interrupted it. Without this the position counts only messages the
+        // model has already finished — see `commitStreamedPrefix`.
+        commitStreamedPrefix()
+        steerRecords.push({
+          text: steer.text,
+          ...(steer.images?.length ? { hadImages: true } : {}),
+          // Position, not timestamp: the transcript is rendered as an ordered
+          // list of assistant blocks, so "after this many blocks" is the only
+          // thing a renderer can act on. Image BYTES are deliberately dropped
+          // here — same rule as the turn's own opening images.
+          afterAssistantBlocks: assistantContent.length,
+        })
+        // Exactly one `steered` frame must reach the client per steer: the
+        // client draws the bubble on it AND cuts the transcript there. This
+        // hook is the only moment this runtime knows where the steer landed
+        // (accept time is all a sidecar turn ever has — there is no later
+        // step boundary the way the neutral loop has one), so it emits here
+        // instead of leaving it to `/api/editor/chat/steer` to guess. The
+        // route itself emits nothing for either lane any more (Task 26).
+        opts.emit({
+          kind: 'steered',
+          sessionId: opts.session.id.sessionId,
+          userMessage: steer.text,
+          imageCount: steer.images?.length ?? 0,
+        })
+      },
+    },
+  )
+
+  // Shared with the neutral lane: see `attachSteerReconciliation` in
+  // `turn-input-channel.ts` for the close-then-drain rule and why abort
+  // reports too, not just a bare close.
+  const closeChannelAndReportUndelivered = attachSteerReconciliation({
+    channel: turnChannel,
+    sessionId: opts.session.id.sessionId,
+    emit: opts.emit,
+    signal: opts.signal,
+  })
+
+  const maxBudgetUsd =
+    typeof opts.costCeilingUsd === 'number'
+      ? Math.max(0, opts.costCeilingUsd - computeSessionCost(opts.session))
+      : undefined
+
+  // Per-turn adapter holds state for partial-stream dedupe so
+  // tool_use_start fires once per tool_use regardless of whether the
+  // SDK surfaces it via content_block_start partials or via the
+  // assistant message.
+  const adapter = createSdkEventAdapter(turnId)
+
+  opts.emit({ kind: 'turn_start', turnId })
+
+  // ── Turn execution ────────────────────────────────────────────────
+  // (`assistantContent` is declared above, next to the input channel.)
+  const toolResults: Record<string, ChatToolResult> = {}
+  let inputTokens = 0
+  let outputTokens = 0
+  let costUsd: number | undefined
+  let vendorStopReason: string | undefined
+  let stopReason: 'end_turn' | 'error' = 'end_turn'
+  let errorMessage: string | undefined
+  // Captured from the SDKSystemMessage init event on the first turn
+  // and persisted to the session record so subsequent turns can
+  // resume. Stays undefined on a successful resume turn (the SDK
+  // emits init with the SAME session_id, which is harmless to
+  // re-write but we treat it as a no-op).
+  let sdkSessionId: string | undefined = opts.session.sdkSessionId
+
+  try {
+    // Dev-only sidecar seam: this lane spawns whatever `claude` binary is on
+    // the developer's own PATH — see resolve-claude-on-path.ts's module doc
+    // comment. Inside the try so a missing binary is reported through the
+    // SAME error/turn_complete path as any other query failure, not an
+    // unhandled throw.
+    const claudeExecutablePath = resolveClaudeOnPath()
+    if (claudeExecutablePath === undefined) {
+      throw new Error(SIDECAR_NO_BINARY_MESSAGE)
+    }
+
+    const q = query({
+      prompt: toSdkPrompt(turnChannel.stream()),
+      options: {
+        cwd: opts.worktreeRoot,
+        model,
+        pathToClaudeCodeExecutable: claudeExecutablePath,
+        // Extended thinking — surfaced to the chat UI as a collapsible
+        // "reasoning" block (see sdk-event-adapter `reasoning_delta`). Adaptive
+        // (Opus 4.6+) lets the model decide when/how much to think (it skips
+        // trivial turns, so there's no fixed per-turn overhead); other models
+        // get a bounded fixed budget. `summarized` keeps the surfaced reasoning
+        // concise rather than dumping the full raw chain.
+        thinking: resolveAnthropicThinkingConfig(model, opts.adaptiveThinking),
+        ...(opts.effort ? { effort: opts.effort } : {}),
+        systemPrompt,
+        // `tools` filters the SDK's BUILT-IN tools only (MCP-namespaced names
+        // there are no-ops). Everything that touches the repository is off:
+        // Desde's own Read/Write/Edit/Glob/Grep/TodoWrite are on the `editor`
+        // MCP server below instead. `tools: []` turns a built-in off for
+        // execution but not for the model's imagination: it may still ask
+        // for `Read` by name, which the SDK refuses (Task 21 spike).
+        tools: [...sdkBuiltins],
+        // The prompt describes the built-ins by their bare names (`Read`,
+        // `Edit`, ...), but on this lane they live on the `editor` MCP server
+        // as `mcp__editor__Read` and so on. An alias routes a model-emitted
+        // bare `Read` to Desde's tool instead of failing as unknown. It only
+        // affects name lookup of the model's tool_use: the tool list the
+        // model sees still carries the namespaced names.
+        toolAliases: SIDECAR_TOOL_ALIASES,
+        ...(opts.disallowedTools?.length
+          ? { disallowedTools: [...opts.disallowedTools] }
+          : {}),
+        ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+        mcpServers: {
+          // Desde's whole neutral tool catalog: its own built-ins plus every
+          // editor tool. See the file header for the naming difference.
+          editor: editorToolServer,
+          // Customer-supplied Figma MCP server, opt-in per
+          // desde.config.json. Read-only by contract
+          // (see system-prompt). Tools register under the `figma`
+          // namespace; the SDK's tool-deferral default means the
+          // model only loads them via tool-search when the user
+          // refers to a Figma file.
+          ...(opts.figmaConfig
+            ? { figma: opts.figmaConfig.mcpServer }
+            : {}),
+          // Customer-declared extensions from `.mcp.json` (see
+          // extensions-config.ts). Registered under their own ids; the
+          // SDK's tool-deferral default means the model only loads their
+          // tools via tool-search when a turn actually calls for them, so a
+          // long list costs nothing per turn. Read-only enforcement is in
+          // canUseTool, not here.
+          ...Object.fromEntries(
+            (opts.extensions ?? []).map((e) => [e.id, e.mcpServer]),
+          ),
+        },
+        // Only the servers above. The Task 21 spike saw servers from the
+        // developer's own account (claude.ai connectors) show up in the tool
+        // list despite `settingSources: []`. `strictMcpConfig` is the CLI's
+        // `--strict-mcp-config`: ignore every MCP configuration that was not
+        // passed in `mcpServers`. Its documented list names `.mcp.json`, user
+        // settings, plugins and agent frontmatter, not claude.ai connectors,
+        // so `disableClaudeAiConnectors` covers those separately. It is a
+        // settings key, applied through the flag-settings layer, which
+        // `settingSources: []` does not turn off. NOT yet re-measured live.
+        strictMcpConfig: true,
+        settings: { disableClaudeAiConnectors: true },
+        canUseTool,
+        // No `hooks`. The read-snapshot hook, the secret-read guard, the
+        // write guard and the write-invalidate hook existed only because the
+        // SDK ran Read, Write and Edit inside its own runtime. Those
+        // built-ins are off; Desde's own tools snapshot, refuse secrets,
+        // journal, lock and invalidate inside the tool.
+        //
+        // permissionMode 'default' fires canUseTool for every MCP tool,
+        // which is every tool that touches the repository. `acceptEdits`
+        // mode would auto-approve edits and skip the gate.
+        permissionMode: 'default',
+        // NO settings sources at all.
+        //
+        // This was `['project']`, to scope settings to the prototype's own
+        // `.claude/` and keep the host machine's `~/.claude/` out of the
+        // model's context. That second goal is still met by `[]` — more
+        // completely, in fact.
+        //
+        // What `['project']` also did, and what the 2026-08-09 audit found as
+        // B6, is load the PROTOTYPE's `.claude/settings.json` — a file that
+        // can declare `hooks`, which the SDK executes as shell commands. In a
+        // runtime that deliberately withholds `Bash` from the agent (see the
+        // `disallowedTools` list above), that handed back arbitrary command
+        // execution as the developer to anything that could write one file.
+        // Two adversaries reach it: prompt-injected content steering the agent
+        // into writing it (now also blocked by `protected-paths.ts`), and a
+        // malicious prototype repo that simply ships one, which no write guard
+        // can stop because the file is already there when the repo is opened.
+        //
+        // `[]` closes the second, which is the one no other control covers.
+        //
+        // Consequence handled elsewhere: `CLAUDE.md` was previously reaching
+        // the model via this setting, so `chat-handler.ts` excluded it from
+        // the project-knowledge digest to avoid double-injection. That
+        // exclusion is now removed — the rule file reaches the model through
+        // the digest's existing untrusted-content fence instead, which is
+        // where repo-authored text belongs.
+        settingSources: [],
+        includePartialMessages: true,
+        ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
+        ...(opts.signal ? { abortController: toAbortController(opts.signal) } : {}),
+        // Phase 3: resume the SDK session if one has been recorded
+        // on this ChatSession. Without resume, every turn looks
+        // like the start of a new conversation from the model's
+        // POV — multi-turn dialogue breaks. The SDK loads prior
+        // history from its JSONL store (`.claude/projects/...`)
+        // and injects it before our prompt.
+        ...(opts.session.sdkSessionId
+          ? { resume: opts.session.sdkSessionId }
+          : {}),
+      },
+    })
+
+    for await (const msg of q) {
+      // A new assistant MESSAGE — i.e. a new inference request. Recorded
+      // against the channel because it is the only observable evidence that the
+      // model has read a message we pushed mid-turn (see
+      // `turn-input-channel.ts` § takeUndeliveredSteers).
+      //
+      // Message boundaries, not output events. This used to fire on every
+      // `assistant` OR `stream_event`, and `includePartialMessages: true` below
+      // means each streamed token is its own `stream_event` — so the partials
+      // of a message that was ALREADY IN FLIGHT when a steer arrived were
+      // counted as evidence the model had read it, which it cannot have been:
+      // that message's request was assembled before the steer existed. The
+      // evidential half of the reconciliation was inert outside a
+      // sub-millisecond window.
+      //
+      // Read off the raw SDK message rather than the adapter's events on
+      // purpose: the adapter emits `text_delta` only from partial messages, so
+      // a turn without partials would look request-free and every steer on it
+      // would be reported for resubmission.
+      const boundaryMessageId = readAssistantMessageBoundaryId(msg)
+      if (boundaryMessageId !== null) {
+        turnChannel.noteAssistantMessage(boundaryMessageId)
+      }
+      // Streamed-text bookkeeping for the steer position (see
+      // `commitStreamedPrefix`). A `message_start` opens a message nothing of
+      // which is committed yet; each text delta extends what the client has on
+      // screen for it.
+      const streamedSignal = readStreamedTextSignal(msg)
+      if (streamedSignal?.kind === 'message-start') {
+        resetStreamedText()
+      } else if (streamedSignal?.kind === 'text-delta') {
+        streamedText += streamedSignal.delta
+      }
+      // Capture turn-state side effects: track assistant blocks +
+      // tool results for persistence; track usage / cost from the
+      // result message. The SSE adapter is purely transport-side.
+      capturePersistenceState({
+        msg,
+        assistantContent,
+        toolResults,
+        alreadyCommittedTextChars: committedStreamedChars,
+      })
+      // The completed message has now landed in `assistantContent` in full, so
+      // none of it is in flight any more. Reset AFTER the capture, which needs
+      // the committed count to avoid writing the prefix twice.
+      if (isCompletedAssistantMessage(msg)) {
+        resetStreamedText()
+      }
+      // First-turn-of-session signal: the init event carries the
+      // SDK's session_id. Stash so we persist it after the turn.
+      const initId = extractInitSessionId(msg)
+      if (initId && !sdkSessionId) {
+        sdkSessionId = initId
+      }
+      const resultPayload = extractResultPayload(msg)
+      if (resultPayload) {
+        inputTokens = resultPayload.inputTokens
+        outputTokens = resultPayload.outputTokens
+        costUsd = resultPayload.costUsd
+        vendorStopReason = resultPayload.vendorStopReason
+        if (resultPayload.subtype !== 'success') {
+          stopReason = 'error'
+          // Same auth-failure mapping as the catch arm: a non-success
+          // result can carry the raw 401 string in errorReason. This lane is
+          // the `claude` binary by definition, so the copy is chosen from
+          // the environment that binary was spawned with.
+          errorMessage = isAuthError(resultPayload.errorReason)
+            ? claudeReauthMessage(process.env)
+            : resultPayload.errorReason
+        }
+        // We own termination: a held-open generator never self-closes, because
+        // the SDK auto-closes stdin only for a single-turn query. `result` is
+        // the turn ending, so this is where we close it — unconditionally, and
+        // with every steer we cannot account for reported back for resubmission.
+        //
+        // This USED to be gated on `pendingCount === 0` ("don't close on a
+        // result that races a steer"). That guard was dead by construction and
+        // measured the wrong thing. Dead: the SDK's consumer is an eager
+        // `for await (const m of stream) await transport.write(m)`
+        // (`Query.streamInput`, node_modules/@anthropic-ai/claude-agent-sdk/
+        // sdk.mjs) that never stops pulling, so the queue empties within a
+        // microtask of the push while the `result` branch runs a macrotask
+        // later — the count was always 0. Wrong thing: "still in our array" is
+        // not the risky state. The risky state is "written to the child's stdin
+        // but never folded into the model's context", which no queue length can
+        // see. A steer pushed during a tool call, written to stdin, and
+        // followed by a model that decides it is done leaves nothing pending
+        // and reaches nobody.
+        closeChannelAndReportUndelivered()
+      }
+      for (const event of adapter.adapt(msg)) {
+        opts.emit(event)
+      }
+    }
+  } catch (err) {
+    if (opts.signal?.aborted) {
+      errorMessage = 'turn aborted'
+    } else if ((err as Error).message === SIDECAR_NO_BINARY_MESSAGE) {
+      // Our own no-binary throw, not an SDK failure — say it plainly rather
+      // than wrapping it in "SDK query failed: …", which would misattribute
+      // a missing local install to the SDK.
+      errorMessage = SIDECAR_NO_BINARY_MESSAGE
+    } else {
+      // Phase 5 rate-limit codex round-1 #1: extract retry-after from
+      // the error's HTTP response header (if any) and embed it in a
+      // shape the downstream classifier already parses. The SDK
+      // surfaces structured `api_retry` / `rate_limit_event` SDK
+      // messages with finer-grained timing — wiring those is a
+      // separate piece (codex #2; deferred — see verdict). For now
+      // the header extract covers the common case where the API
+      // returned a 429 with retry-after set.
+      const retryAfter = extractRetryAfterFromError(err)
+      const retryHint = retryAfter !== undefined ? ` (retry after ${retryAfter}s)` : ''
+      const rawMessage = (err as Error).message
+      // Auth failures (expired/invalid local `claude` CLI credentials)
+      // surface as a raw "Failed to authenticate. API Error: 401 …"
+      // string — accurate but non-actionable. Swap in the remediation
+      // that fits how this turn was credentialed (key vs subscription).
+      errorMessage = isAuthError(rawMessage)
+        ? claudeReauthMessage(process.env)
+        : `SDK query failed: ${rawMessage}${retryHint}`
+    }
+    stopReason = 'error'
+    opts.emit({ kind: 'error', turnId, reason: errorMessage })
+    opts.emit({ kind: 'turn_complete', turnId, stopReason: 'error' })
+  } finally {
+    // Backstop for every path that reaches neither the result close nor the
+    // abort listener: a thrown query, a stream that ends without a result, a
+    // turn killed by the SDK. Closing twice is a no-op and the steer drain is
+    // one-shot, so the common case (already reconciled on `result` or at abort)
+    // costs nothing — while a turn that died holding a steer still reports it
+    // rather than swallowing it.
+    closeChannelAndReportUndelivered()
+  }
+
+  const completedAt = new Date().toISOString()
+  const turn: ChatTurn = {
+    id: turnId,
+    startedAt,
+    completedAt,
+    userMessage: opts.userMessage,
+    selection: opts.selection,
+    page: opts.page,
+    assistantContent,
+    toolResults,
+    editProposals: editProposalRefs,
+    // Omitted entirely when nothing was steered, so a turn that took no steers
+    // serializes exactly as it did before this field existed.
+    ...(steerRecords.length > 0 ? { steers: steerRecords } : {}),
+    usage:
+      inputTokens > 0 || outputTokens > 0
+        ? { inputTokens, outputTokens }
+        : undefined,
+    costUsd,
+    model,
+    ...(opts.effort ? { effort: opts.effort } : {}),
+    error: errorMessage,
+  }
+/**
+ * Turn the vendor's stop reason into a sentence a designer can act on.
+ *
+ * Added 2026-08-18. This used to be `vendorStopReason ?? 'SDK turn ended with
+ * an error'`, so the banner said things like **"max_tokens"** — Mo's reaction
+ * was "I have no idea where max_tokens is coming from and what I should do
+ * next", which is the whole problem: it is the name of a request parameter,
+ * printed to someone who never set one. The fallback was no better; "SDK" is
+ * our dependency, not a fact about their work.
+ *
+ * Each branch says what happened to the TURN and what to do about it. An
+ * unrecognised reason keeps the raw string, on purpose — a stop reason nobody
+ * has written copy for is a case we do not understand, and swallowing it into
+ * "something went wrong" would delete the only clue in a bug report.
+ */
+function describeVendorStop(reason: string | undefined): string {
+  switch (reason) {
+    case 'max_tokens':
+      return 'The reply hit its length limit and stopped partway. Ask for the rest, or ask for it in smaller pieces.'
+    case 'refusal':
+      return 'The model declined to answer this one. Rephrasing the request usually gets past it.'
+    case 'pause_turn':
+      return 'The turn paused partway through. Send the message again to pick it up.'
+    case 'aborted':
+      return 'The turn was stopped before it finished.'
+    case undefined:
+      return 'The turn ended without finishing, and no reason was given. Sending it again is the fastest way to find out whether it repeats.'
+    default:
+      return `The turn ended without finishing (${reason}).`
+  }
+}
+
+  if (stopReason === 'error' && !errorMessage) {
+    turn.error = describeVendorStop(vendorStopReason)
+  }
+
+  const updatedSession: ChatSession = {
+    ...opts.session,
+    ...(sdkSessionId ? { sdkSessionId } : {}),
+    updatedAt: completedAt,
+    turns: [...opts.session.turns, turn],
+    // Phase 4a — persist the accumulated fileReads + conflicts so the
+    // save dialog can render conflict UI after the turn ends and so
+    // a subsequent turn's reads still count as the base for the
+    // current set of writes. Only emit the keys when there's
+    // something to persist; otherwise leave undefined to match the
+    // pre-Phase-4 shape and keep on-disk files small.
+    ...(Object.keys(fileReads).length > 0 ? { fileReads } : {}),
+    ...(Object.keys(conflicts).length > 0 ? { conflicts } : {}),
+  }
+
+  return { session: updatedSession, turn }
+}
+
+/**
+ * What a raw SDK message says about the assistant message currently streaming.
+ *
+ * Only two things matter for the steer position: a message STARTED (nothing of
+ * it is on the client's screen yet) and a message GREW by this much text (that
+ * text is on screen now). Everything else — a thinking delta, a content-block
+ * boundary, a tool result, a completed message — returns null.
+ *
+ * It reads the same `content_block_delta` / `text_delta` shape the SSE adapter
+ * turns into a `text_delta` event (`sdk-event-adapter.ts` § fromPartial). That
+ * is deliberate and load bearing: the client's on-screen text IS those events,
+ * so counting anything else here would count characters the user cannot see.
+ */
+type StreamedTextSignal =
+  | { kind: 'message-start' }
+  | { kind: 'text-delta'; delta: string }
+
+function readStreamedTextSignal(msg: unknown): StreamedTextSignal | null {
+  if (!msg || typeof msg !== 'object') return null
+  const m = msg as { type?: unknown; event?: unknown }
+  if (m.type !== 'stream_event' || !m.event || typeof m.event !== 'object') return null
+  const event = m.event as {
+    type?: unknown
+    delta?: { type?: unknown; text?: unknown }
+  }
+  if (event.type === 'message_start') return { kind: 'message-start' }
+  if (
+    event.type === 'content_block_delta' &&
+    event.delta?.type === 'text_delta' &&
+    typeof event.delta.text === 'string' &&
+    event.delta.text.length > 0
+  ) {
+    return { kind: 'text-delta', delta: event.delta.text }
+  }
+  return null
+}
+
+/** A finished `assistant` message — the point its blocks reach `assistantContent`. */
+function isCompletedAssistantMessage(msg: unknown): boolean {
+  return (
+    !!msg && typeof msg === 'object' && (msg as { type?: unknown }).type === 'assistant'
+  )
+}
+
+function extractInitSessionId(msg: unknown): string | undefined {
+  if (!msg || typeof msg !== 'object') return undefined
+  const m = msg as { type?: unknown; subtype?: unknown; session_id?: unknown }
+  if (m.type !== 'system' || m.subtype !== 'init') return undefined
+  return typeof m.session_id === 'string' ? m.session_id : undefined
+}
+
+interface ResultPayload {
+  subtype: 'success' | string
+  inputTokens: number
+  outputTokens: number
+  costUsd?: number
+  vendorStopReason?: string
+  errorReason?: string
+}
+
+function extractResultPayload(msg: unknown): ResultPayload | null {
+  if (!isResultMessage(msg)) return null
+  return {
+    subtype: msg.subtype,
+    inputTokens: msg.usage?.input_tokens ?? 0,
+    outputTokens: msg.usage?.output_tokens ?? 0,
+    costUsd: typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : undefined,
+    vendorStopReason: msg.stop_reason ?? undefined,
+    errorReason:
+      msg.subtype !== 'success'
+        ? msg.errors && msg.errors.length > 0
+          ? msg.errors.join('; ')
+          : `SDK turn ended with subtype '${msg.subtype}'`
+        : undefined,
+  }
+}
+
+interface CapturePersistenceArgs {
+  msg: unknown
+  assistantContent: ChatAssistantBlock[]
+  toolResults: Record<string, ChatToolResult>
+  /**
+   * How many leading characters of THIS message's text a steer split has
+   * already pushed onto `assistantContent` (see `commitStreamedPrefix` in
+   * `runChatTurnSdk`). They are skipped here, so the message's text ends up
+   * split across two blocks at the point the user interrupted it instead of
+   * being written twice.
+   *
+   * Zero on every message nobody steered into, which is the overwhelming
+   * majority — the branch below is then a no-op and the output is identical
+   * to what it was before steering existed.
+   */
+  alreadyCommittedTextChars?: number
+}
+
+function capturePersistenceState(args: CapturePersistenceArgs): void {
+  const { msg, assistantContent, toolResults } = args
+  const flattened = flattenSdkMessage(msg)
+
+  // Text and tool_use blocks are collected into separate lists (tagged with
+  // their original position) so the interleaving from `message.content` —
+  // which matters for the persisted transcript's read order — survives the
+  // flattener's split.
+  type Ordered = { index: number; block: ChatAssistantBlock }
+  const ordered: Ordered[] = [
+    ...flattened.textBlocks.map((t): Ordered => ({ index: t.index, block: { type: 'text', text: t.text } })),
+    ...flattened.toolUseBlocks.map(
+      (tu): Ordered => ({
+        index: tu.index,
+        block: { type: 'tool_use', toolUseId: tu.id, name: tu.name, input: tu.input },
+      }),
+    ),
+  ]
+  ordered.sort((a, b) => a.index - b.index)
+  // Consumed across text blocks in content order, so a message whose text was
+  // committed piecewise by several steers drops exactly what was written.
+  let charsToDrop = args.alreadyCommittedTextChars ?? 0
+  for (const { block } of ordered) {
+    if (charsToDrop > 0 && block.type === 'text') {
+      const drop = Math.min(charsToDrop, block.text.length)
+      charsToDrop -= drop
+      const rest = block.text.slice(drop)
+      // A block the steer split consumed entirely leaves nothing to add. An
+      // empty text block would render as a blank paragraph and would shift
+      // every later steer's recorded position by one.
+      if (rest.length === 0) continue
+      assistantContent.push({ type: 'text', text: rest })
+      continue
+    }
+    assistantContent.push(block)
+  }
+
+  for (const result of flattened.toolResults) {
+    toolResults[result.toolUseId] = result.ok
+      ? { ok: true, output: result.output }
+      : { ok: false, error: result.error }
+  }
+}
+
+function isResultMessage(msg: unknown): msg is {
+  type: 'result'
+  subtype: string
+  stop_reason: string | null
+  total_cost_usd?: number
+  usage?: { input_tokens?: number; output_tokens?: number }
+  errors?: string[]
+} {
+  return (
+    !!msg &&
+    typeof msg === 'object' &&
+    (msg as { type?: unknown }).type === 'result'
+  )
+}
+
+
+/**
+ * Mirror of the legacy orchestrator's context envelope. Keeps the
+ * agent grounded on what the user is looking at without forcing a
+ * tool call. Per-turn random tag so a malicious page title can't
+ * close the envelope and inject into the user-prompt position.
+ */
+function buildUserMessageWithContext(
+  userMessage: string,
+  selection: ChatSelectionSnapshot | undefined,
+  page: ChatPageSnapshot | undefined,
+): string {
+  const lines: string[] = []
+  if (page) {
+    const parts: string[] = []
+    if (page.route) parts.push(`route=${JSON.stringify(page.route)}`)
+    if (page.framework)
+      parts.push(`framework=${JSON.stringify(page.framework)}`)
+    if (page.title) parts.push(`title=${JSON.stringify(page.title)}`)
+    if (parts.length > 0) lines.push(`Page: ${parts.join(', ')}`)
+  }
+  if (selection) {
+    const parts: string[] = []
+    if (selection.componentName)
+      parts.push(`component=${JSON.stringify(selection.componentName)}`)
+    if (selection.componentFile)
+      parts.push(`file=${JSON.stringify(selection.componentFile)}`)
+    if (selection.editTarget) {
+      parts.push(
+        `at=${JSON.stringify(
+          `${selection.editTarget.file}:${selection.editTarget.line}:${selection.editTarget.column}`,
+        )}`,
+      )
+    }
+    parts.push(`selector=${JSON.stringify(selection.selector)}`)
+    if (parts.length > 0) lines.push(`Selection: ${parts.join(', ')}`)
+  }
+  if (lines.length === 0) return userMessage
+  const tag = `context-${randomUUID().slice(0, 8)}`
+  return `<${tag}>\n${lines.join('\n')}\n</${tag}>\n\n${userMessage}`
+}
+
+/**
+ * `resolveAnthropicThinkingConfig` moved to
+ * `../llm-providers/anthropic-adaptive-thinking` (imported and re-exported
+ * near the top of this file, alongside `supportsAnthropicAdaptiveThinking`)
+ * so the Anthropic descriptor's `effort.toRequest` (neutral lane) can call it
+ * without pulling in the Agent SDK. Existing importers of this file
+ * (this file's own call above, and `resolve-thinking-config.test.ts`) are
+ * unaffected.
+ */
+
+/*
+ * `buildSdkPrompt` used to live here. It branched: a plain string for a text
+ * turn, a yields-once-then-returns generator for an image turn. Both are gone,
+ * and the prompt is now always `turnChannel.stream()`.
+ *
+ * The branch was the danger, not either shape on its own. Measured against SDK
+ * 0.3.143 (`tasks/scripts/sdk-steering-probe.mts`), a generator that returns
+ * drops a mid-turn pushed message SILENTLY — `streamInput` resolves, no error,
+ * the model never sees it. Keeping the branch would therefore have shipped
+ * steering that works on text turns and destroys the user's message on image
+ * turns, with nothing at any layer reporting it. One shape, always, is what
+ * makes that class of bug unreachable rather than merely guarded against.
+ *
+ * The message-building itself (context-enveloped text block, empty text block
+ * omitted because the Messages API rejects it, one vision block per image) is
+ * `buildUserMessage` in `./sdk-user-message.ts` — same bytes, same envelope,
+ * used for the opening message and every pushed message alike. The turn's
+ * input channel (`../agent-chat/turn-input-channel.ts`) yields the neutral
+ * `TurnInputMessage` shape; `toSdkPrompt` here wraps its `stream()` and maps
+ * each one through `buildUserMessage` before it reaches `query()`.
+ */
+
+/**
+ * Adapt the route's AbortSignal to the AbortController the SDK
+ * expects. SDK's `Options.abortController` is the entry point for
+ * upstream cancellation.
+ */
+function toAbortController(signal: AbortSignal): AbortController {
+  const controller = new AbortController()
+  if (signal.aborted) {
+    controller.abort()
+    return controller
+  }
+  signal.addEventListener('abort', () => controller.abort(), { once: true })
+  return controller
+}

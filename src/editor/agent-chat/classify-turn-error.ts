@@ -92,8 +92,8 @@ const RATE_LIMITED_PATTERNS = [
 ]
 
 // Authentication-failure detection. Editor's SDK runtime authenticates
-// through the bundled `claude` CLI's subscription credentials (or an
-// `ANTHROPIC_API_KEY` when set). When those credentials are expired /
+// through the `claude` command line tool on PATH's subscription credentials
+// (or an `ANTHROPIC_API_KEY` when set). When those credentials are expired /
 // missing / rejected, Anthropic returns HTTP 401 and the SDK surfaces a
 // throw whose message contains the shapes below. The raw string
 // ("Failed to authenticate. API Error: 401 …") is accurate but
@@ -132,10 +132,9 @@ export const AUTH_REAUTH_MESSAGE =
 
 /**
  * The same 401, when the turn ran on the Claude subscription the `claude`
- * binary is signed in with (`EDITOR_USE_CLAUDE_SUBSCRIPTION`, which desktop
- * dev mode sets). The login is repaired in a terminal, never from the settings
- * gear: the desktop's downloaded runtime and the user's own `claude` share one
- * keychain entry, so `/login` in either fixes both.
+ * command line tool on PATH is signed in with (`EDITOR_USE_CLAUDE_SUBSCRIPTION`,
+ * which desktop dev mode sets). The login is repaired in a terminal: run
+ * `claude` then `/login`, which fixes the same sign-in Editor's sidecar reads.
  */
 export const AUTH_REAUTH_SUBSCRIPTION_MESSAGE =
   'Authentication failed (401). Chat is running on the Claude subscription signed ' +
@@ -279,8 +278,20 @@ export function extractRetryAfterFromError(err: unknown): number | undefined {
   }
   if (raw === null || raw === undefined) return undefined
   const n = typeof raw === 'string' ? parseInt(raw, 10) : Number(raw)
-  if (!Number.isFinite(n) || n <= 0) return undefined
-  return Math.min(n, MAX_RETRY_AFTER_SECONDS)
+  if (Number.isFinite(n)) {
+    if (n <= 0) return undefined
+    return Math.min(n, MAX_RETRY_AFTER_SECONDS)
+  }
+  // RFC 9110 also allows an HTTP-date ("Wed, 23 Sep 2026 12:00:30 GMT"),
+  // which `parseInt` cannot read. It is the moment to retry at, so the wait
+  // is the whole seconds from now until then. A date already past means no
+  // wait was asked for.
+  if (typeof raw !== 'string') return undefined
+  const at = Date.parse(raw)
+  if (!Number.isFinite(at)) return undefined
+  const seconds = Math.ceil((at - Date.now()) / 1000)
+  if (seconds <= 0) return undefined
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS)
 }
 
 /**

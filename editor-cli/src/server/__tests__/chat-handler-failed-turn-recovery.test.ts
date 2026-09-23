@@ -28,9 +28,9 @@ import {
 import type { ChatSession, ChatTurn } from "../../../../src/editor/agent-chat/types.js"
 
 // The BYO-key cutover: chat dispatch now refuses without a model credential,
-// because the SDK would otherwise spawn the bundled `claude` binary and run on
-// whatever Claude subscription it is signed in with, which a distributed
-// product may not offer. These tests exercise dispatch mechanics rather than
+// because the SDK would otherwise spawn the `claude` command line tool on
+// PATH and run on whatever Claude subscription it is signed in with, which a
+// distributed product may not offer. These tests exercise dispatch mechanics rather than
 // auth, so they supply a key. The refusal itself is covered by
 // `src/editor/llm-providers/assert-chat-credentials.test.ts` and by the
 // dedicated case in `chat-handler.test.ts`.
@@ -101,15 +101,18 @@ function makeLoaders(opts: {
   onDisk?: () => ChatSession
 }): ChatHandlerLoaders {
   return {
-    loadRunChatTurnSdk: async () =>
-      ({ runChatTurnSdk: opts.run }) as unknown as Awaited<
-        ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>
+    loadRunChatTurnNeutral: async () =>
+      ({ runChatTurnNeutral: opts.run }) as unknown as Awaited<
+        ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>
       >,
-    loadRunChatTurnNeutral: async () => ({
-      runChatTurnNeutral: async () => {
-        throw new Error("makeLoaders: this suite's turns run on the SDK loader, not neutral")
-      },
-    }),
+    loadRunChatTurnSidecar: async () =>
+      ({
+        runChatTurnSdk: async () => {
+          throw new Error(
+            "makeLoaders: this suite's turns run on the neutral loader (the default dispatch for a keyed Anthropic session), not the sidecar",
+          )
+        },
+      }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSidecar"]>>,
     loadSessionStore: async () =>
       ({
         loadSession: async () => ({
@@ -183,13 +186,13 @@ describe("chat handler — a turn that dies in the handler", () => {
     })
     let firstSave = true
     const loaders = {
-      loadRunChatTurnSdk: async () =>
+      loadRunChatTurnNeutral: async () =>
         ({
-          runChatTurnSdk: async () => ({
+          runChatTurnNeutral: async () => ({
             session: withRunnerTurn(),
             turn: runnerTurn,
           }),
-        }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnSdk"]>>,
+        }) as unknown as Awaited<ReturnType<ChatHandlerLoaders["loadRunChatTurnNeutral"]>>,
       loadSessionStore: async () =>
         ({
           // Disk already has the runner's turn — the save landed before

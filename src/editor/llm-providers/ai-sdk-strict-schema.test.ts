@@ -215,7 +215,11 @@ describe('every json_schema call site in the repo', () => {
 })
 
 describe('toStrictJsonSchema', () => {
-  it('expresses an optional enum as a nullable one, null included in the values', () => {
+  it('expresses an optional enum as two branches, the enum or null, never a type array', () => {
+    // Anthropic's structured-output validator refuses an enum next to
+    // `type: ['string', 'null']` ("Enum value 'left' does not match declared
+    // type"), measured live 2026-09-23 on the translate-goal schema. OpenAI's
+    // strict mode accepts either shape, so the branch list serves both.
     const out = toStrictJsonSchema({
       type: 'object',
       properties: { axis: { type: 'string', enum: ['x', 'y'] } },
@@ -223,8 +227,7 @@ describe('toStrictJsonSchema', () => {
       additionalProperties: false,
     }) as JsonObject
     expect((out.properties as JsonObject).axis).toEqual({
-      type: ['string', 'null'],
-      enum: ['x', 'y', null],
+      anyOf: [{ type: 'string', enum: ['x', 'y'] }, { type: 'null' }],
     })
   })
 

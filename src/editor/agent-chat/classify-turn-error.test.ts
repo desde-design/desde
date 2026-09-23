@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   AUTH_REAUTH_MESSAGE,
@@ -232,6 +232,38 @@ describe("extractRetryAfterFromError (codex round-1 #1)", () => {
     expect(
       extractRetryAfterFromError({ headers: { "retry-after": "999999" } }),
     ).toBe(3600)
+  })
+
+  describe("the HTTP-date form RFC 9110 also allows", () => {
+    const now = Date.parse("2026-09-23T12:00:00.000Z")
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(now)
+    })
+    afterEach(() => vi.useRealTimers())
+
+    it("still reads a number of seconds as seconds", () => {
+      expect(extractRetryAfterFromError({ headers: { "retry-after": "30" } })).toBe(30)
+    })
+
+    it("reads a date 30 seconds ahead as 30 seconds", () => {
+      const date = new Date(now + 30_000).toUTCString()
+      expect(date).toBe("Wed, 23 Sep 2026 12:00:30 GMT")
+      expect(extractRetryAfterFromError({ headers: { "retry-after": date } })).toBe(30)
+      expect(
+        extractRetryAfterFromError({ headers: new Headers({ "retry-after": date }) }),
+      ).toBe(30)
+    })
+
+    it("caps a date far ahead at 3600s", () => {
+      const date = new Date(now + 86_400_000).toUTCString()
+      expect(extractRetryAfterFromError({ headers: { "retry-after": date } })).toBe(3600)
+    })
+
+    it("ignores a date that has already passed", () => {
+      const date = new Date(now - 30_000).toUTCString()
+      expect(extractRetryAfterFromError({ headers: { "retry-after": date } })).toBeUndefined()
+    })
   })
 
   it("never throws on weird shapes", () => {

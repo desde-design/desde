@@ -2640,7 +2640,7 @@ describe("useEditorEditing: the bridge session", () => {
 
   it("an empty pin_selections clears the store and the page without a round trip", async () => {
     // `pin_selections([])` is the documented way for the chat agent to clear
-    // (`src/editor/agent-chat-sdk/system-prompt.ts`). The adapter returns for
+    // (`src/editor/agent-chat/system-prompt.ts`). The adapter returns for
     // an empty input without sending anything and without announcing, so if
     // the hook does not write the store nothing clears at all. And the PAGE
     // has to be cleared as well, which is what `clearSelection` is for: it

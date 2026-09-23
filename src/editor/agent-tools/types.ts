@@ -129,7 +129,7 @@ export interface ToolContext {
    * this branch changed?". Branch mode (the only substrate) has no pinned
    * session-start commit, so the SDK runtime recomputes this fresh each
    * turn as the merge-base of HEAD with the default branch (see
-   * `agent-chat-sdk/run-chat-turn-sdk.ts` and
+   * `agent-chat-sidecar/run-chat-turn-sidecar.ts` and
    * `worktree/git-branches.ts#branchModeRootCommitSha`). Absent when that
    * can't be resolved (no default branch, detached HEAD, non-CLI/test
    * context) — those tools then surface a clear "not configured" error.

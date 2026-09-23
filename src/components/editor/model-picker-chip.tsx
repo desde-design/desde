@@ -58,6 +58,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Slider } from "@/components/ui/slider"
+import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { reconcileSessionModelConfig } from "@/editor/core/model-catalog"
 import type { EffortLevel, SessionModelConfig } from "@/editor/core/model-catalog"
 import {
@@ -376,7 +378,19 @@ export function ModelPickerChip({
     : -1
   const effortIndex = chosenEffortIndex >= 0 ? chosenEffortIndex : defaultEffortIndex
 
+  // The SELECTED provider's own catalog answered from the `claude` command
+  // line tool on PATH's sign-in, not an API key — dev mode or the
+  // subscription sidecar. Read on `providerCatalog`, not the response-level
+  // `catalog.source`: the two can disagree (Anthropic on `cli` while OpenAI
+  // is `api` in the same response), and only Anthropic HAS a subscription
+  // runtime at all, so a response-level `cli` while an OpenAI model is
+  // selected must not show this badge. The badge names the fact so a chat
+  // that stops working when that sign-in ends is not a surprise.
+  const runsOnSubscription =
+    effective.provider === "anthropic" && providerCatalog.source === "cli"
+
   return (
+    <span className="inline-flex shrink-0 items-center gap-1">
     <DropdownMenu
       onOpenChange={(open) => {
         // Reopening shows the running model's provider again, not wherever
@@ -574,5 +588,21 @@ export function ModelPickerChip({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+    {runsOnSubscription ? (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="secondary" className="text-2xs" data-testid="editor-model-subscription-badge">
+              subscription (dev)
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            Chat runs on the claude command line tool&apos;s sign-in. Add an API key to use the
+            product path.
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    ) : null}
+    </span>
   )
 }

@@ -168,7 +168,7 @@ const SHARED_PROPS_MIN_NAMES_PER_TYPE = 20
  * Signal 2 alone left `react-feather` (286 names, no name containing `Icon`,
  * 195 families) judged a design system. That is not free. A wrongly-onboarded
  * icon set lands in the agent's grounding digest, which is sorted by name and
- * capped at 250 (`DIGEST_COMPONENT_CAP`, `agent-chat-sdk/grounding-tools.ts`).
+ * capped at 250 (`DIGEST_COMPONENT_CAP`, `agent-chat/grounding-tools.ts`).
  * `react-feather`'s names are front-loaded alphabetically (`Activity`,
  * `Airplay`, `AlertCircle`…), so it fills that cap on its own and pushes the
  * real design system's components into the "+N more" overflow.

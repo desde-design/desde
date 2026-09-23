@@ -29,28 +29,15 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import type { McpStdioServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import {
+  isReservedMcpServerId,
+  isValidMcpServerId,
+  MCP_SERVER_ID_RULE,
+  type McpStdioServerConfig,
+} from './mcp-server-config'
 
 const MCP_FILENAME = '.mcp.json'
 const LEGACY_CONFIG_FILENAME = 'desde.config.json'
-
-/**
- * Ids we register ourselves. A customer server taking one of these would
- * shadow the Editor's own tools, so the collision is refused rather than
- * silently resolved.
- *
- * Was `['composer', 'editor']` pre-rename, guarding both the legacy and
- * current names of the built-in tool namespace (`mcp__composer__*` /
- * `mcp__editor__*`). The 2026-08-08 Composer→Editor sweep (commit
- * a3177b0b) blindly replaced the remaining literal `'composer'` with
- * `'editor'`, collapsing this into a duplicate-valued set — unlike
- * `LEGACY_CONFIG_FILENAME`, which that same commit deliberately protected
- * because old repos read it from disk, nothing on disk still depends on
- * `'composer'` being a reserved *extension id*: the built-in namespace is
- * `mcp__editor__*` only, so a customer's `.mcp.json` is free to name an
- * extension `composer` without colliding with anything.
- */
-const RESERVED_IDS = new Set(['editor'])
 
 /**
  * Bare tool-name prefixes treated as read-only. Convention by community
@@ -133,8 +120,15 @@ function parseServer(
   errors: string[],
   warnings: string[],
 ): EditorExtension | null {
-  if (RESERVED_IDS.has(id)) {
+  if (isReservedMcpServerId(id)) {
     errors.push(`${id}: "${id}" is a reserved extension id`)
+    return null
+  }
+  // Refused at load so BOTH lanes are protected: the id is spliced into
+  // `mcp__<id>__<tool>`, and one containing `__` would be read back by the
+  // permission gate as a different id. See `MCP_SERVER_ID_RULE`.
+  if (!isValidMcpServerId(id)) {
+    errors.push(`${id}: extension id "${id}" is not allowed. An id may use ${MCP_SERVER_ID_RULE}.`)
     return null
   }
   if (typeof raw.command !== 'string' || raw.command.trim() === '') {

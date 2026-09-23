@@ -12,6 +12,7 @@ import { OPENAI_MODEL_CATALOG } from '../../../../src/editor/llm-providers/opena
 
 const twoCatalogs = {
   catalogs: [ANTHROPIC_MODEL_CATALOG, OPENAI_MODEL_CATALOG],
+  sourceByProvider: { anthropic: 'static', openai: 'static' } as const,
   source: 'static' as const,
 }
 
@@ -46,7 +47,7 @@ describe('buildModelCatalogResponse: the default is a decision, not an index', (
     // actually pick rather than throwing.
     const body = buildModelCatalogResponse(
       null,
-      { catalogs: [OPENAI_MODEL_CATALOG], source: 'static' },
+      { catalogs: [OPENAI_MODEL_CATALOG], sourceByProvider: { openai: 'static' }, source: 'static' },
       { env: {} },
     )
     expect(body.defaultProviderId).toBe('openai')
@@ -57,15 +58,40 @@ describe('buildModelCatalogResponse: the default is a decision, not an index', (
     const body = buildModelCatalogResponse(null, twoCatalogs, { env: {} })
     const anthropic = body.catalogs.find((c) => c.providerId === 'anthropic')
     const openai = body.catalogs.find((c) => c.providerId === 'openai')
-    expect(anthropic?.capabilities.midTurnSteering).toBe(true)
-    expect(openai?.capabilities.midTurnSteering).toBe(false)
-    expect(openai?.capabilities.vendorRateLimitEvents).toBe(false)
+    expect(anthropic?.capabilities.webTools).toEqual(['web_search', 'web_fetch'])
+    expect(openai?.capabilities.webTools).toEqual(['web_search'])
+    // The neutral loop raises rate_limit_warning off a bare 429 now, so
+    // every provider has this true — see
+    // OPENAI_DESCRIPTOR.capabilities.vendorRateLimitEvents.
+    expect(openai?.capabilities.vendorRateLimitEvents).toBe(true)
   })
 
   it('still carries the models and the source untouched', () => {
     const body = buildModelCatalogResponse(null, twoCatalogs, { env: {} })
     expect(body.catalogs[0]?.models).toEqual(ANTHROPIC_MODEL_CATALOG.models)
     expect(body.source).toBe('static')
+  })
+
+  it("carries each provider's OWN source, not the response-level weakest one", () => {
+    // Anthropic answered from the `claude` command line tool on PATH's
+    // sign-in; OpenAI answered from its API key. The response-level
+    // `source` still reports the weakest ('cli'), but a per-provider reader
+    // — the model chip's badge — has to see each entry's own answer.
+    const body = buildModelCatalogResponse(
+      null,
+      {
+        catalogs: [ANTHROPIC_MODEL_CATALOG, OPENAI_MODEL_CATALOG],
+        sourceByProvider: { anthropic: 'cli', openai: 'api' },
+        source: 'cli',
+      },
+      { env: {} },
+    )
+    const anthropic = body.catalogs.find((c) => c.providerId === 'anthropic')
+    const openai = body.catalogs.find((c) => c.providerId === 'openai')
+    expect(anthropic?.source).toBe('cli')
+    expect(openai?.source).toBe('api')
+    // Untouched: still the aggregate, not overwritten by the per-entry work.
+    expect(body.source).toBe('cli')
   })
 })
 

@@ -22,7 +22,7 @@ import {
   handleLlmCredentialsRoute,
   providerIdFromPath,
 } from "./llm-credentials-handler.js"
-import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
+import { isClaudeOnPath } from "../../../src/editor/agent-chat-sidecar/resolve-claude-on-path.js"
 import {
   VIEWER_PROBE_ROUTE,
   VIEWER_PROJECTS_ROUTE,
@@ -66,7 +66,7 @@ import {
   brokeredWrite,
   rollbackWarning,
   type BrokerOp,
-} from "../../../src/editor/agent-chat-sdk/write-broker.js"
+} from "../../../src/editor/agent-chat/write-broker.js"
 import { handleStatusQuery, type McpHandlerContext } from "./mcp-handler.js"
 import {
   handleChatRequest,
@@ -241,8 +241,8 @@ import {
   serveBootstrapJs,
   serveStatic,
 } from "./static-assets.js"
-import { runRetentionGc } from "../../../src/editor/agent-chat-sdk/retention-gc.js"
-import { gcAllProposalBlobs } from "../../../src/editor/agent-chat-sdk/proposal-blob-gc.js"
+import { runRetentionGc } from "../../../src/editor/agent-chat/retention-gc.js"
+import { gcAllProposalBlobs } from "../../../src/editor/agent-chat/proposal-blob-gc.js"
 import { resolveLlmConfig } from "./llm-config.js"
 import { getProvider } from "../../../src/editor/llm-providers/registry.js"
 
@@ -458,12 +458,6 @@ export interface HttpServerOptions {
      * the whole gate here.
      */
     vscodeLink?: boolean
-    // No `neutralChat` field here. That gate is opt-OUT and env-only
-    // (`EDITOR_NEUTRAL_CHAT=0` disables it) with no project-config
-    // equivalent, so there is nothing for the bootstrap to surface: the
-    // model catalog response is what tells the client whether the OpenAI
-    // group exists at all. See `isNeutralChatEnabled` in
-    // `dormant-surfaces.ts`.
   }
   /**
    * Resolved read-roots registry for the chat handler's git tools.
@@ -2276,7 +2270,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-if-present",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
@@ -2285,7 +2279,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
@@ -2294,7 +2288,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   // Provider-scoped writes. These sit AFTER the two reserved sub-routes above:
@@ -2308,7 +2302,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
@@ -2318,7 +2312,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     authPolicy: "bearer-origin-required",
     handler: (req, res, _ctx, url) =>
       handleLlmCredentialsRoute(req, res, url, {
-        claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+        claudeOnPath: isClaudeOnPath(),
       }),
   },
   {
@@ -4956,22 +4950,21 @@ async function handleEditRequest(
   // acceptable for an advisory-only signal ("deterministic edits are
   // instant" + "never delay the edit"). `fireManifestValueMismatchDriftCheck`
   // is genuinely fire-and-forget (not awaited) and guarantees no unhandled
-  // rejection. NOTE: because this runs after the lock is released, an SDK
+  // rejection. NOTE: because this runs after the lock is released, an
   // agent-chat write to the SAME file racing in right after this edit could
   // theoretically re-read a newer version of the file than the one this edit
   // actually produced, mis-naming which edit an advisory entry is attributed
-  // to. Corrected 2026-08-05 (final audit-fixes wave, item 5): "agent-chat
-  // writes bypass the CLI edit locks entirely" is now only HALF true — since
-  // Task 13's `sdk-write-guard.ts`, the SDK's built-in `Write`/`Edit` DO take
-  // this same per-file lock (via an injected `acquireWriteLock`, budget-
-  // bounded — see that module's "Bounded acquisition" residual for when it
-  // still degrades journal-only). The six MCP *structural* tools
-  // (`insert_component`, `scaffold_route`, `delete_file`, `rename_file`,
-  // `insert_element`, `manage_package`) still bypass this lock entirely —
-  // they go through `brokeredWrite` (write-broker.ts), which is
-  // `FileLockManager`-only, not `withFileEditLocks`. Pre-existing gap,
-  // harmless for a signal that's advisory-only and coalesced by component
-  // identity anyway; recorded here rather than silently accepted.
+  // to. Chat writes bypass the CLI's per-file edit locks entirely: both chat
+  // lanes run their own Write/Edit tool (neither runs the SDK's built-in
+  // Write/Edit any more — Task 13's `sdk-write-guard.ts`, which briefly took
+  // this same per-file lock for the SDK lane, was removed once that lane
+  // stopped needing it), and go through `brokeredWrite` (write-broker.ts),
+  // which is `FileLockManager`-only, not `withFileEditLocks`. Same
+  // bypass applies to the six MCP *structural* tools (`insert_component`,
+  // `scaffold_route`, `delete_file`, `rename_file`, `insert_element`,
+  // `manage_package`). Pre-existing gap, harmless for a signal that's
+  // advisory-only and coalesced by component identity anyway; recorded
+  // here rather than silently accepted.
   if (result.ok && body.edit.kind === "prop") {
     fireManifestValueMismatchDriftCheck(body.edit, ctx)
   }

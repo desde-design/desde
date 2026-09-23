@@ -20,8 +20,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { brokeredWrite, type BrokerOp } from '../agent-chat-sdk/write-broker'
-import type { BackupEntry } from '../agent-chat-sdk/backup-journal'
+import { brokeredWrite, type BrokerOp } from '../agent-chat/write-broker'
+import type { BackupEntry } from '../agent-chat/backup-journal'
 import type { FileLockManager } from './file-lock-manager'
 
 export const MAX_HISTORY_STEPS = 50

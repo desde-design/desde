@@ -17,6 +17,18 @@ describe('createCostGuard', () => {
     expect(guard.turnCostUsd).toBeCloseTo(afterOne * 2, 10)
   })
 
+  it('prices cache-read and cache-creation tokens on the recorded usage', () => {
+    // claude-opus-5-5 has explicit cacheReadPerM 0.20 / cacheWritePerM 5.
+    const guard = createCostGuard({ model: 'claude-opus-5-5', priorCostUsd: 0 })
+    guard.record({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 1_000_000,
+      cacheCreationInputTokens: 1_000_000,
+    })
+    expect(guard.turnCostUsd).toBeCloseTo(0.2 + 5, 6)
+  })
+
   it('counts the session s prior spend, not just this turn s', () => {
     const guard = createCostGuard({ model: 'claude-opus-4-8', priorCostUsd: 9.99, ceilingUsd: 10 })
     expect(guard.exceeded).toBe(false)

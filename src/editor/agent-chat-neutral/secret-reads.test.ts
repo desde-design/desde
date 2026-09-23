@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { buildToolPermissionGate } from '../agent-chat-sdk/edit-ack'
+import { buildToolPermissionGate } from '../agent-chat/edit-ack'
 import { buildGlobToolSpec, buildGrepToolSpec } from './builtin-glob-grep'
 import { buildReadToolSpec } from './builtin-read'
 

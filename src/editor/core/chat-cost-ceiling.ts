@@ -1,7 +1,7 @@
 /**
  * Where the foreground chat's spend ceiling comes from.
  *
- * `runChatTurnSdk`'s pre-turn check (`src/editor/agent-chat-sdk/run-chat-turn-sdk.ts`)
+ * `runChatTurnSdk`'s pre-turn check (`src/editor/agent-chat-sidecar/run-chat-turn-sidecar.ts`)
  * refuses a new turn once the session's cumulative cost crosses
  * `opts.costCeilingUsd`. This module is the single place that turns the raw
  * `.desde/config.json` `chat.costCeilingUsd` value into what gets passed

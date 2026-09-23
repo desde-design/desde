@@ -17,7 +17,7 @@ import type { ToolSpec } from '../agent-chat/tool-spec'
 import {
   buildEditorToolSpecs,
   type BuildEditorToolServerOpts,
-} from '../agent-chat-sdk/editor-tools'
+} from '../agent-chat/editor-tools'
 import { buildBuiltinToolSpecs, type BuiltinToolOpts } from './builtin-tools'
 
 /** The namespace the SDK's MCP registration produces, applied by hand here. */

@@ -43,27 +43,6 @@ export type CapabilityTarget =
  */
 export type CapabilityActivation = 'next-message' | 'cli-restart'
 
-/**
- * The chat runtimes a capability can be served by.
- *
- * Two exist. `claude-agent-sdk` registers MCP servers and ships WebSearch and
- * WebFetch. `neutral` is Desde's own loop on the `LLMProvider` seam: its tool
- * catalog is builtins plus the editor tools and NOTHING else — it never reads
- * `extensions` or `figmaConfig`, and `builtin-tools.ts` says in its own header
- * that it has no WebFetch and no WebSearch.
- *
- * So the whole catalog is `claude-agent-sdk`-only today, and this field exists
- * because that was being reported as false. `computeEnabledCapabilityIds` had
- * no idea which lane it was answering for, and its own comment claimed
- * "'enabled' here means the same thing the runtime means" — which was true on
- * one lane and untrue on the other. A user turned Figma on, the panel said it
- * was live on the next message, and the model had no such tools.
- *
- * The string union rather than an import: `core/` is framework- and
- * runtime-neutral, and `resolveChatRuntimeKind` lives in `editor-cli`.
- */
-export type CapabilityRuntimeId = 'claude-agent-sdk' | 'neutral'
-
 export interface CapabilityDescriptor {
   /** Stable id. The enable API accepts this and nothing else. */
   id: string
@@ -72,12 +51,6 @@ export interface CapabilityDescriptor {
   summary: string
   target: CapabilityTarget
   activation: CapabilityActivation
-  /**
-   * Which chat runtimes actually serve this. Required, not defaulted: a new
-   * entry has to state it, because the alternative is a capability that
-   * silently claims both lanes and is only right about one.
-   */
-  runtimes: ReadonlyArray<CapabilityRuntimeId>
   /**
    * Env var the capability needs to function, if any.
    *
@@ -121,9 +94,6 @@ export const CAPABILITY_CATALOG: ReadonlyArray<CapabilityDescriptor> = [
     summary: 'Build a screen from a Figma frame, using the project\'s own components.',
     target: 'mcp-extension',
     activation: 'next-message',
-    // The SDK lane registers this as an MCP server; the neutral lane composes
-    // builtins plus editor tools and never reads `opts.extensions`.
-    runtimes: ['claude-agent-sdk'],
     requiresEnv: 'FIGMA_API_KEY',
     mcpServer: {
       command: 'npx',
@@ -138,9 +108,8 @@ export const CAPABILITY_CATALOG: ReadonlyArray<CapabilityDescriptor> = [
     summary: 'Look things up online while building.',
     target: 'web-search',
     activation: 'next-message',
-    // The neutral lane ships no WebSearch and no WebFetch — see the header of
-    // `agent-chat-neutral/builtin-tools.ts`, which says so and points here.
-    runtimes: ['claude-agent-sdk'],
+    // Declared as a provider server tool when the chosen provider's
+    // descriptor lists `web_search` in `webTools`. Both shipped providers do.
   },
 ]
 
@@ -159,40 +128,43 @@ export function capabilitySecretNames(): ReadonlySet<string> {
 }
 
 /**
- * Can this runtime actually serve this capability?
+ * Can this turn actually serve this capability: for web search, whether the
+ * chosen PROVIDER runs it; everything else is served unconditionally.
  *
- * Config alone never answers it. `.mcp.json` says a server is DECLARED; the
- * lane says whether anything registers it.
+ * `serverToolIds` is the provider server tools this turn can declare
+ * (`ServerToolId` values; a plain string list here because `core/` imports no
+ * provider type). Absent means "not a question for this caller" (the system
+ * prompt block, which is written before the provider is resolved). Given,
+ * web search is served only when it lists `web_search`.
  */
-export function runtimeSupportsCapability(
+function servesCapability(
   descriptor: CapabilityDescriptor,
-  runtime: CapabilityRuntimeId,
+  serverToolIds: ReadonlyArray<string> | undefined,
 ): boolean {
-  return descriptor.runtimes.includes(runtime)
+  if (descriptor.target === 'web-search' && serverToolIds !== undefined) {
+    return serverToolIds.includes('web_search')
+  }
+  return true
 }
 
 /**
  * Which catalog ids are already on, given what the CLI loaded this turn.
  *
- * Two inputs, not one. `enabledExtensionIds` says what the CONFIG declares.
- * `chatRuntime` says which lane will read it. A capability is on only when
- * both agree, because "the config declares it" and "the model can call it"
- * are different facts and this function used to conflate them.
- *
- * `chatRuntime` defaults to `claude-agent-sdk`. That is the historical
- * behaviour and the one lane that serves everything in the catalog, so an
- * older caller keeps the answer it always got.
+ * `enabledExtensionIds` says what the CONFIG declares. A capability is on
+ * only when the config declares it AND the turn can actually serve it
+ * (`servesCapability`), because those are different facts and this function
+ * used to conflate them.
  */
 export function computeEnabledCapabilityIds(input: {
   enabledExtensionIds: ReadonlyArray<string>
   webFetchAllowedHosts: ReadonlyArray<string>
   webSearchEnabled: boolean
-  chatRuntime?: CapabilityRuntimeId
+  /** See {@link servesCapability}. */
+  serverToolIds?: ReadonlyArray<string>
 }): Set<string> {
-  const runtime = input.chatRuntime ?? 'claude-agent-sdk'
   const on = new Set<string>()
   for (const descriptor of CAPABILITY_CATALOG) {
-    if (!runtimeSupportsCapability(descriptor, runtime)) continue
+    if (!servesCapability(descriptor, input.serverToolIds)) continue
     if (
       descriptor.target === 'mcp-extension' &&
       input.enabledExtensionIds.includes(descriptor.id)
@@ -230,16 +202,10 @@ export function detectCapabilityGaps(
   userMessage: string,
   enabledIds: ReadonlySet<string>,
   dismissedIds: ReadonlySet<string> = new Set(),
-  chatRuntime: CapabilityRuntimeId = 'claude-agent-sdk',
 ): CapabilityGap[] {
   const gaps: CapabilityGap[] = []
   for (const descriptor of CAPABILITY_CATALOG) {
     if (!descriptor.detect) continue
-    // The banner's whole content is an Enable button. On a runtime that would
-    // not register the capability anyway, that button is a dead end, so the
-    // honest move is to raise nothing and let the prompt block (which now says
-    // this needs a different model) carry the explanation.
-    if (!runtimeSupportsCapability(descriptor, chatRuntime)) continue
     if (enabledIds.has(descriptor.id) || dismissedIds.has(descriptor.id)) continue
     const detail = descriptor.detect(userMessage)
     if (detail) gaps.push({ capabilityId: descriptor.id, detail })
@@ -260,17 +226,19 @@ export function findCapability(id: string): CapabilityDescriptor | undefined {
  */
 export function describeDisabledCapabilities(
   enabledIds: ReadonlySet<string>,
-  chatRuntime: CapabilityRuntimeId = 'claude-agent-sdk',
+  /** See {@link servesCapability}. */
+  serverToolIds?: ReadonlyArray<string>,
 ): string | null {
   const off = CAPABILITY_CATALOG.filter((c) => !enabledIds.has(c.id))
   if (off.length === 0) return null
 
   // Split by WHY each one is off, because the remedy differs and telling the
   // model the wrong one sends the user to a panel that cannot help. A
-  // capability this runtime does not serve stays off however the config is
-  // written; only a different model brings it back.
-  const enableable = off.filter((c) => runtimeSupportsCapability(c, chatRuntime))
-  const unavailable = off.filter((c) => !runtimeSupportsCapability(c, chatRuntime))
+  // capability the chosen model cannot serve (web search on a provider with
+  // no such server tool) stays off however the config is written; only a
+  // different model brings it back.
+  const enableable = off.filter((c) => servesCapability(c, serverToolIds))
+  const unavailable = off.filter((c) => !servesCapability(c, serverToolIds))
   const line = (c: CapabilityDescriptor) => `- **${c.label}** (\`${c.id}\`) — ${c.summary}`
 
   const sections: string[] = [
@@ -295,8 +263,8 @@ export function describeDisabledCapabilities(
     sections.push(
       '',
       'These cannot be used with the model this conversation is running on, so',
-      'the Extensions panel will not help. Say that switching to a Claude model',
-      'is what would make them available:',
+      'the Extensions panel will not help. Say that a model from a provider that',
+      'offers them is what would make them available:',
       '',
       ...unavailable.map(line),
     )

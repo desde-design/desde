@@ -29,9 +29,9 @@ import { applyIterationDataLlm, type ApplyIterationDataLlmInput } from './iterat
  * Strip both credential paths so `getProvider()` reaches its throw.
  *
  * `ANTHROPIC_API_KEY` absent alone is not enough: with
- * `EDITOR_USE_CLAUDE_SUBSCRIPTION` on, the registry picks the bundled
- * `claude` binary instead and never throws. Both have to be off, and this
- * machine may well have either one set.
+ * `EDITOR_USE_CLAUDE_SUBSCRIPTION` on, the registry picks the `claude`
+ * command line tool on PATH instead and never throws. Both have to be off,
+ * and this machine may well have either one set.
  */
 function withNoCredentials(): void {
   vi.stubEnv('ANTHROPIC_API_KEY', '')

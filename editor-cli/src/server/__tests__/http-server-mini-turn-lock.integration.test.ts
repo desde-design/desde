@@ -135,7 +135,7 @@ function makeLoaders(): ApplicatorLoaders {
           await writeFile(join(repoDir, "App.vue"), BOUND_REWRITTEN, "utf8")
           return { outcome: "applied", notes: "Rewrote filterPlaceholder binding" }
         },
-      }) as unknown as typeof import("../../../../src/editor/agent-chat-sdk/edit-fix-mini-turn"),
+      }) as unknown as typeof import("../../../../src/editor/agent-chat/edit-fix-mini-turn"),
   } as unknown as ApplicatorLoaders
 }
 

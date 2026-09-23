@@ -49,7 +49,6 @@ const FIGMA_OFF = {
   enabled: false,
   enableable: true,
   envReady: false,
-  claudeModelsOnly: true,
 }
 
 const WEB_SEARCH_ON = {
@@ -64,7 +63,6 @@ const WEB_SEARCH_ON = {
   enabled: true,
   enableable: false,
   envReady: true,
-  claudeModelsOnly: true,
 }
 
 /**

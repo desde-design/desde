@@ -17,7 +17,7 @@ const REPO_ROOT = join(__dirname, "..", "..", "..", "..")
 
 const SOURCES = [
   "editor-cli/src/server/edit-handler.ts",
-  "src/editor/agent-chat-sdk/fs-structural-tools.ts",
+  "src/editor/agent-chat/fs-structural-tools.ts",
   "src/editor/edit-service/edit-history.ts",
 ]
 

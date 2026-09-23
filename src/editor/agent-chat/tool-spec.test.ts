@@ -45,4 +45,42 @@ describe('toToolDefs', () => {
   it('refuses a duplicate name, which both wire formats reject at request time', () => {
     expect(() => toToolDefs([spec, spec])).toThrow(/duplicate tool name 'read_thing'/)
   })
+
+  it('uses inputJsonSchema as given when present, instead of converting the zod shape', () => {
+    // An MCP server's tool arrives with a JSON Schema of its own and no zod
+    // shape. That schema is the server's contract, so it goes out as sent.
+    const inputJsonSchema = {
+      type: 'object',
+      properties: { text: { type: 'string', description: 'What to echo.' } },
+      required: ['text'],
+      additionalProperties: false,
+    }
+    const [def] = toToolDefs([
+      { ...spec, name: 'mcp__echo__echo', kind: 'extension', inputShape: {}, inputJsonSchema },
+    ])
+    expect(def.inputSchema).toEqual(inputJsonSchema)
+  })
+
+  it('still drops $schema from an inputJsonSchema, for the same reason as a converted one', () => {
+    const [def] = toToolDefs([
+      {
+        ...spec,
+        name: 'mcp__echo__echo',
+        kind: 'extension',
+        inputShape: {},
+        inputJsonSchema: {
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {},
+        },
+      },
+    ])
+    expect(def.inputSchema).toEqual({ type: 'object', properties: {} })
+  })
+
+  it('does not mutate the inputJsonSchema it was handed', () => {
+    const inputJsonSchema = { $schema: 'x', type: 'object', properties: {} }
+    toToolDefs([{ ...spec, kind: 'extension', inputShape: {}, inputJsonSchema }])
+    expect(inputJsonSchema.$schema).toBe('x')
+  })
 })

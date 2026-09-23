@@ -26,9 +26,9 @@
  * actually lands the transport.
  */
 
-import { createOpenAI } from '@ai-sdk/openai'
+import { createOpenAI, type OpenAIProvider } from '@ai-sdk/openai'
 import { AiSdkProvider } from './ai-sdk-provider'
-import type { LLMProvider } from './types'
+import type { LLMProvider, ServerToolDef } from './types'
 
 /** Provider-options key. `@ai-sdk/openai` looks its own options up by name. */
 export const OPENAI_PROVIDER_OPTIONS_KEY = 'openai'
@@ -62,5 +62,31 @@ export function buildOpenAiProvider(input: BuildOpenAiProviderInput): LLMProvide
     // retain the prompt, and the prompts this product sends are the user's
     // own source code.
     defaultProviderOptions: { store: false },
+    serverTool: (def) => openAiServerTool(def, openai.tools),
   })
+}
+
+/**
+ * OpenAI's own web tool for a server def. Only `web_search` exists: the
+ * Responses API has no fetch-a-URL tool, so `web_fetch` returns `undefined`
+ * and the adapter leaves it out. The descriptor's `webTools` already says
+ * `['web_search']`, so the loop does not ask for fetch here in the first
+ * place; this is the second end of that gate.
+ *
+ * `maxUses` has no OpenAI equivalent and is not sent. The domain list becomes
+ * the tool's `filters.allowedDomains`, which also admits subdomains.
+ *
+ * On replay: with `store: false` (see the file header), `@ai-sdk/openai`
+ * drops a replayed provider-executed call instead of sending an
+ * `item_reference` the vendor would no longer have. The model's text about
+ * what it found still replays; the raw search call does not.
+ */
+export function openAiServerTool(
+  def: ServerToolDef,
+  tools: OpenAIProvider['tools'],
+): ReturnType<OpenAIProvider['tools']['webSearch']> | undefined {
+  if (def.id !== 'web_search') return undefined
+  return tools.webSearch(
+    def.allowedDomains ? { filters: { allowedDomains: def.allowedDomains } } : {},
+  )
 }

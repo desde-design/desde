@@ -31,21 +31,6 @@ export interface DesktopUpdateState {
   error?: string
 }
 
-/**
- * State of the on-demand `claude` binary install — see
- * `desktop/claude-runtime-controller.ts` and `tasks/electron-app.md`'s
- * "stop bundling the claude binary, fetch it on first run" work. No
- * `"idle"` phase (unlike {@link DesktopUpdateState}): unlike update
- * checking, this starts working the moment the app boots, so there is no
- * meaningful "nothing happening yet" state to represent.
- */
-export interface DesktopClaudeRuntimeState {
-  phase: "checking" | "downloading" | "ready" | "error"
-  error?: string
-  /** Named cause for an `"error"` phase — lets the UI say WHY (offline, disk full, permissions, registry unreachable, a failed integrity check) rather than just showing the raw message. */
-  errorReason?: "offline" | "registry-unreachable" | "disk-full" | "permissions" | "integrity" | "unknown"
-}
-
 export interface DesktopBridge {
   appVersion: string
   updates: {
@@ -87,29 +72,6 @@ export interface DesktopBridge {
     checkForUpdates: () => Promise<{ performed: boolean }>
     getAutoDownload: () => Promise<boolean>
     setAutoDownload: (value: boolean) => Promise<void>
-  }
-  /**
-   * The on-demand `claude` binary install — see {@link DesktopClaudeRuntimeState}.
-   * Present unconditionally alongside `updates` (both are desktop-only
-   * surfaces gated the same way: absent entirely in a plain browser tab).
-   */
-  claudeRuntime: {
-    getState: () => Promise<DesktopClaudeRuntimeState>
-    /** Returns an unsubscribe function — same shape as `updates.onState`. */
-    onState: (cb: (state: DesktopClaudeRuntimeState) => void) => () => void
-    /**
-     * Re-triggers the install. Safe to call anytime — a no-op while one is
-     * already in flight, and the only way to recover from phase `"error"`
-     * without restarting the app.
-     *
-     * Resolves once main has decided, not once the install finishes — the
-     * ongoing progress still arrives through `onState`. `started: false`
-     * means the gate refused (a configured provider no longer needs the
-     * runtime); `skippedReason` then carries the short, user-facing line
-     * explaining why nothing happened, so the caller who clicked Retry can
-     * show it instead of the click silently doing nothing.
-     */
-    retry: () => Promise<{ started: boolean; skippedReason?: string }>
   }
   /**
    * Native folder chooser — `dialog.showOpenDialog` under the hood, replacing

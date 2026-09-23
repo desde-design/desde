@@ -10,12 +10,24 @@
  *    the turn on the first tool call.
  *  - `edit_proposed` and `edit_overwrite_warning`: those come out of the
  *    permission gate and `brokeredWrite`, exactly as they do on the SDK lane.
- *  - `rate_limit_warning`: Anthropic-only by decision. Its fields model
- *    Anthropic's subscription overage pool and its banner says "this Claude
- *    account". See `ANTHROPIC_ONLY_EVENT_KINDS` in `chat-stream-events.ts`.
+ *  - `rate_limit_warning`: not from THIS adapter. A `ProviderEvent` stream
+ *    carries no such signal to translate — the neutral loop's only rate-limit
+ *    signal is a 429 transport error, which surfaces as a thrown error, not
+ *    a `ProviderEvent`. `streamStepWithRetry` (`run-chat-turn-neutral.ts`)
+ *    catches that error and raises `rate_limit_warning` itself, directly,
+ *    before this adapter (or anything else here) ever runs. See
+ *    `ANTHROPIC_ONLY_EVENT_KINDS` in `chat-stream-events.ts` for why that
+ *    kind is no longer Anthropic-only.
+ *
+ * A server tool (the vendor-run web search and fetch) is shown with the SAME
+ * two frames a Desde-run tool uses, `tool_use_start` then `tool_result`, so
+ * the panel renders it with its ordinary tool disclosure. The difference is
+ * only who emits the result: here, straight off the vendor's stream, instead
+ * of the loop after it ran the tool.
  */
 
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
+import { describeServerToolOutput } from '../agent-chat/server-tool-display'
 import type { ToolHandlerResult } from '../agent-chat/tool-spec'
 import type {
   ImageContent,
@@ -54,12 +66,39 @@ export function createNeutralEventAdapter(turnId: string): NeutralEventAdapter {
             input: ev.input,
           }
           return
+        case 'server_tool_use':
+          if (announced.has(ev.id)) return
+          announced.add(ev.id)
+          yield {
+            kind: 'tool_use_start',
+            turnId,
+            toolUseId: ev.id,
+            name: ev.name,
+            input: ev.input,
+          }
+          return
+        case 'server_tool_result': {
+          // A summary, not the payload: a fetch result is the whole page and a
+          // search result carries an encrypted blob per hit. The payload is
+          // persisted on the turn for replay; the frame is for reading.
+          const text = describeServerToolOutput(ev.output)
+          yield ev.isError === true
+            ? { kind: 'tool_result', turnId, toolUseId: ev.toolUseId, ok: false, error: text }
+            : { kind: 'tool_result', turnId, toolUseId: ev.toolUseId, ok: true, output: text }
+          return
+        }
         case 'usage':
           yield {
             kind: 'usage',
             turnId,
             inputTokens: ev.inputTokens,
             outputTokens: ev.outputTokens,
+            ...(ev.cacheReadInputTokens !== undefined
+              ? { cacheReadInputTokens: ev.cacheReadInputTokens }
+              : {}),
+            ...(ev.cacheCreationInputTokens !== undefined
+              ? { cacheCreationInputTokens: ev.cacheCreationInputTokens }
+              : {}),
           }
           return
         case 'message_complete':

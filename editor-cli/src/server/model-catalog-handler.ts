@@ -56,18 +56,36 @@ import {
  * flag is off.
  */
 const FALLBACK_CAPABILITIES: ProviderCapabilities = {
-  midTurnSteering: false,
-  vendorReportedCostUsd: false,
-  inTurnBudgetStop: "step-boundary",
   reasoningVisibility: false,
   vendorRateLimitEvents: false,
   imagesInPrompt: false,
-  webTools: false,
+  webTools: [],
 }
 
 /** A served catalog plus the asymmetries the client has to gate on. */
 export interface ModelCatalogEntry extends ProviderModelCatalog {
   capabilities: ProviderCapabilities
+  /**
+   * The provider's display label (its descriptor's `label`, e.g. "Anthropic"
+   * or "OpenAI"). Added so the client can name the account a rate-limit
+   * banner is about (`ChatStatusBanners`' `providerLabel`) instead of
+   * hard-coding "Claude" — see `RateLimitWarningBanner` in
+   * `chat-status-banners.tsx`. Falls back to the raw `providerId` for a
+   * catalog entry with no matching descriptor, same as `FALLBACK_CAPABILITIES`
+   * below; that case does not happen through the real resolver, only a
+   * hand-built `ResolvedModelCatalogs` in a test.
+   */
+  label: string
+  /**
+   * THIS provider's own source — `resolved.sourceByProvider[providerId]`,
+   * not the response-level `source` below. A per-provider reading matters
+   * because the two can disagree: Anthropic can answer from the `claude`
+   * command line tool on PATH's sign-in (`cli`) while OpenAI answers from
+   * its API key (`api`) in the same response, and the model chip's
+   * "subscription (dev)" badge has to know THAT provider's own source, not
+   * whichever is weakest across the whole response.
+   */
+  source: ModelCatalogSource
 }
 
 export interface ModelCatalogResponse {
@@ -120,6 +138,12 @@ export function buildModelCatalogResponse(
       ...catalog,
       capabilities:
         getDescriptor(catalog.providerId)?.capabilities ?? FALLBACK_CAPABILITIES,
+      label: getDescriptor(catalog.providerId)?.label ?? catalog.providerId,
+      // Falls back to the response-level source for a hand-built
+      // `ResolvedModelCatalogs` in a test that omits `sourceByProvider` for
+      // a provider it does carry a catalog for — the real resolver always
+      // populates both in lockstep.
+      source: resolved.sourceByProvider[catalog.providerId] ?? resolved.source,
     })),
     defaultProviderId: primary.providerId,
     default: defaultModelConfig(primary),

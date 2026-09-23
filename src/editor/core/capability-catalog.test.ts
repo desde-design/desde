@@ -5,7 +5,6 @@ import {
   describeDisabledCapabilities,
   detectCapabilityGaps,
   findCapability,
-  runtimeSupportsCapability,
 } from './capability-catalog'
 
 const NONE = { enabledExtensionIds: [], webFetchAllowedHosts: [], webSearchEnabled: false }
@@ -66,42 +65,37 @@ describe('computeEnabledCapabilityIds', () => {
     expect([...on]).toEqual([])
   })
 
-  it('does not report an extension as enabled on a runtime that cannot run it', () => {
-    // The neutral lane composes builtins plus editor tools only: it never
-    // registers an MCP server. Reporting Figma as on there told the user a
-    // tool existed that the model could not call.
+  it('reports Figma as on, since the runtime connects MCP servers through its own stdio client', () => {
+    // `agent-chat-neutral/mcp-client-tools.ts` spawns `.mcp.json` servers
+    // itself, under the same `mcp__figma__*` names.
     const on = computeEnabledCapabilityIds({
       ...NONE,
       enabledExtensionIds: ['figma'],
-      webSearchEnabled: true,
-      chatRuntime: 'neutral',
-    })
-    expect(on.has('figma')).toBe(false)
-    expect(on.has('web-search')).toBe(false)
-  })
-
-  it('is unchanged on the SDK lane, which does register them', () => {
-    const on = computeEnabledCapabilityIds({
-      ...NONE,
-      enabledExtensionIds: ['figma'],
-      chatRuntime: 'claude-agent-sdk',
     })
     expect(on.has('figma')).toBe(true)
   })
-})
 
-describe('runtimeSupportsCapability', () => {
-  it('says every catalog entry needs the Claude runtime today', () => {
-    for (const c of CAPABILITY_CATALOG) {
-      expect(runtimeSupportsCapability(c, 'claude-agent-sdk'), c.id).toBe(true)
-      expect(runtimeSupportsCapability(c, 'neutral'), c.id).toBe(false)
-    }
+  it('reports web search OFF when the provider serves no server tools', () => {
+    const on = computeEnabledCapabilityIds({
+      ...NONE,
+      webSearchEnabled: true,
+      serverToolIds: [],
+    })
+    expect(on.has('web-search')).toBe(false)
+    const withSearch = computeEnabledCapabilityIds({
+      ...NONE,
+      webSearchEnabled: true,
+      serverToolIds: ['web_search'],
+    })
+    expect(withSearch.has('web-search')).toBe(true)
   })
 
-  it('makes every entry state its runtimes rather than defaulting', () => {
-    for (const c of CAPABILITY_CATALOG) {
-      expect(c.runtimes.length, `${c.id} must name its runtimes`).toBeGreaterThan(0)
-    }
+  it('reports web search as on when no serverToolIds are given', () => {
+    const on = computeEnabledCapabilityIds({
+      ...NONE,
+      webSearchEnabled: true,
+    })
+    expect(on.has('web-search')).toBe(true)
   })
 })
 
@@ -170,15 +164,28 @@ describe('describeDisabledCapabilities', () => {
     expect(block).not.toContain('**Figma**')
   })
 
-  it('does not tell a neutral-lane model to point at a panel that cannot help', () => {
-    const block = describeDisabledCapabilities(new Set(), 'neutral')!
-    expect(block).toContain('Figma')
-    expect(block).toMatch(/cannot be used with the model/i)
+  it('lists Figma and web search under available-but-OFF, with no cannot-be-used section', () => {
+    const block = describeDisabledCapabilities(new Set())!
+    expect(block).toContain('**Figma**')
+    expect(block).toContain('**Web search**')
+    expect(block).toContain('Extensions panel')
+    expect(block).not.toMatch(/cannot be used with the model/i)
   })
 
-  it('keeps the panel wording on the SDK lane', () => {
-    const block = describeDisabledCapabilities(new Set(), 'claude-agent-sdk')!
-    expect(block).toContain('Extensions panel')
+  it('moves web search under cannot-be-used when the provider serves no server tools, leaving Figma enableable', () => {
+    const block = describeDisabledCapabilities(new Set(), [])!
+    const [enableable, unavailable] = block.split(/cannot be used with the model/i)
+    expect(enableable).not.toContain('**Web search**')
+    expect(enableable).toContain('**Figma**')
+    expect(unavailable).toContain('**Web search**')
+    expect(unavailable).not.toContain('**Figma**')
+  })
+
+  it('names no vendor in the unavailable remedy', () => {
+    const block = describeDisabledCapabilities(new Set(), [])!
+    expect(block).not.toMatch(/Claude/)
+    // The prompt wraps at ~76 columns, so the phrase is read with line breaks folded.
+    expect(block.replace(/\s+/g, ' ')).toContain('a model from a provider that offers them')
   })
 })
 
@@ -222,4 +229,3 @@ describe('legacy figma config counts as enabled', () => {
     }
   })
 })
-

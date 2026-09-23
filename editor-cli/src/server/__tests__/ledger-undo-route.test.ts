@@ -457,7 +457,7 @@ describe("POST /api/editor/ledger/:id/undo", () => {
   // fixed — as proof every touched file was created by this edit. That
   // inference is false whenever a producer appends an `edit` entry with
   // a real `afterHash` but genuinely never wrote a backup for a file
-  // that already existed. `src/editor/agent-chat-sdk/fs-structural-tools.ts`'s
+  // that already existed. `src/editor/agent-chat/fs-structural-tools.ts`'s
   // `manage_package` handler does exactly this for its lockfile-tracking
   // follow-up append (the loop after `install()` runs): it records the
   // lockfile's post-install hash with no `backupDir` at all, whether or

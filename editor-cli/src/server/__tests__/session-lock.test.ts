@@ -210,7 +210,7 @@ describe("lock key derivation", () => {
     // SEPARATOR-qualified prefix an actual escape would. Pinned here so a
     // future "simplify the check" pass can't reintroduce the blunt
     // `rel.startsWith('..')` bug this audit found (and fixed) in the
-    // sibling helper `toRel` (src/editor/agent-chat-sdk/edit-ack.ts).
+    // sibling helper `toRel` (src/editor/agent-chat/edit-ack.ts).
     expect(normalizeLockPath(ROOT, "..fixture.vue")).toBe("..fixture.vue")
     expect(normalizeLockPath(ROOT, "src/..cache/App.vue")).toBe("src/..cache/App.vue")
     expect(fileEditLockKey(ROOT, "..fixture.vue")).not.toBe(

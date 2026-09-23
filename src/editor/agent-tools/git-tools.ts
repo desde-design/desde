@@ -20,7 +20,7 @@
  * raw filesystem paths.
  */
 
-import { isSecretAgentPath } from '../agent-chat-sdk/protected-paths'
+import { isSecretAgentPath } from '../agent-chat/protected-paths'
 import type { ReadRoot, ReadRootRegistry } from '../core/read-roots'
 import { GitRunnerError, runGit, validateRef, validateSha } from './git-runner'
 import { readFileFromRoot } from './read-root-fs'

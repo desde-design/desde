@@ -1,8 +1,11 @@
 /**
  * Which model lists the chat picker gets, and where each comes from.
  *
- * One entry per SERVABLE provider descriptor (`chatRuntimeServable` below),
- * each resolved independently and merged into the response together. Per
+ * One entry per registered provider descriptor, each resolved independently
+ * and merged into the response together (every descriptor's chat runtime can
+ * dispatch today — Task 26 folded the one gated lane, neutral chat, into the
+ * product's only runtime — so nothing filters the set any more; see
+ * `includeDescriptor` below for the seam that still exists for tests). Per
  * provider, three answers are tried in this order (Mo, 2026-09-02, said of
  * Anthropic originally: "add the live functionality and have the hard coded
  * as a back up ... the live list should also work in dev mode, using the
@@ -13,8 +16,8 @@
  *    where `apply-llm-credentials.ts` puts a stored key too). The
  *    descriptor's `listLiveModels` lists what that key can use.
  *  - `cli`: Anthropic only, and only when no key is active but dev mode /
- *    `EDITOR_USE_CLAUDE_SUBSCRIPTION` is on. The bundled `claude` binary is
- *    asked, through the Agent SDK's `supportedModels()` control request,
+ *    `EDITOR_USE_CLAUDE_SUBSCRIPTION` is on. The `claude` command line tool on
+ *    PATH is asked, through the Agent SDK's `supportedModels()` control request,
  *    what it offers on the account it is signed into. That is the only
  *    source that can see a subscription, and only Anthropic has one.
  *  - `static`: neither, the descriptor has no live source, or a live source
@@ -23,12 +26,6 @@
  * A live list is merged over the static one (`live-model-catalog.ts`), so a
  * model a vendor ships appears here without a code change, and a model the
  * static file still names but the account cannot use does not.
- *
- * A provider whose chat runtime cannot dispatch today is filtered out
- * entirely before any of this runs (`chatRuntimeServable`). It reads the
- * environment only, same as the dispatch half in `chat-runtime-dispatch.ts`
- * (see the comment there for why) — see `chatRuntimeServable`'s own doc
- * comment for why that is the client half of a both-ends gate.
  *
  * **Only a credentialed provider is served** (codex fix, 2026-09-04). A
  * provider whose chat runtime CAN dispatch but has no key and no
@@ -68,9 +65,9 @@ import { listAnthropicLiveModels, fromAgentSdk } from "../../../src/editor/llm-p
 import { mergeLiveModels, type LiveModel } from "../../../src/editor/llm-providers/live-model-catalog.js"
 import { isClaudeSubscriptionOptIn } from "../../../src/editor/llm-providers/claude-subscription.js"
 import {
-  assertClaudeRuntimeReady,
-  resolveClaudeExecutablePath,
-} from "../../../src/editor/llm-providers/resolve-claude-executable.js"
+  resolveClaudeOnPath,
+  SIDECAR_NO_BINARY_MESSAGE,
+} from "../../../src/editor/agent-chat-sidecar/resolve-claude-on-path.js"
 // From the SDK-FREE sibling, not `run-chat-turn-sdk.js` (which imports the
 // Agent SDK at module scope): this module is on the boot graph, so pulling
 // that in here would put the SDK on every boot, OpenAI-only included (M1,
@@ -85,7 +82,6 @@ import {
 } from "../../../src/editor/llm-providers/provider-registry.js"
 import type { ProviderDescriptor } from "../../../src/editor/llm-providers/provider-descriptor.js"
 import { getRateCard, UNKNOWN_MODEL_RATE } from "../../../src/editor/llm-providers/rate-cards.js"
-import { isNeutralChatEnabled } from "./dormant-surfaces.js"
 
 /**
  * `source` describes the WEAKEST live source among the providers this
@@ -100,6 +96,15 @@ export type ModelCatalogSource = "api" | "cli" | "static"
 
 export interface ResolvedModelCatalogs {
   catalogs: ProviderModelCatalog[]
+  /**
+   * Each SERVED provider's own source, keyed by `providerId`. `source`
+   * below is the WEAKEST of these (see its own doc comment) — informational,
+   * cache-TTL-driving, and not what a per-provider reading like the model
+   * chip's "subscription (dev)" badge should key on: Anthropic can be `cli`
+   * while OpenAI is `api` in the same response, and a badge keyed on the
+   * aggregate would say so about the wrong provider.
+   */
+  sourceByProvider: Readonly<Record<string, ModelCatalogSource>>
   source: ModelCatalogSource
 }
 
@@ -112,6 +117,7 @@ export const STATIC_MODEL_CATALOGS: ResolvedModelCatalogs = {
   catalogs: [
     withDefaultEffort(ANTHROPIC_MODEL_CATALOG, getDescriptor("anthropic")?.effort.defaultLevel),
   ],
+  sourceByProvider: { anthropic: "static" },
   source: "static",
 }
 
@@ -151,8 +157,11 @@ export interface ModelCatalogResolverDeps {
   log?: (message: string) => void
   /**
    * Which descriptors this resolution may serve at all. Defaults to
-   * `chatRuntimeServable`. Tests override this to reach a second provider
-   * without needing the neutral-chat flag on.
+   * including every registered descriptor — every provider's chat runtime
+   * can dispatch today (Task 26). Kept as a seam for tests that want to
+   * narrow the servable set without touching credentials, e.g. proving the
+   * nothing-credentialed fallback walks precedence rather than trusting
+   * `DEFAULT_PROVIDER_PRECEDENCE[0]` unconditionally.
    */
   includeDescriptor?: (d: ProviderDescriptor) => boolean
 }
@@ -185,25 +194,7 @@ function effortFallbackFor(descriptor: ProviderDescriptor) {
 }
 
 /**
- * Which providers this resolution may serve at all.
- *
- * A provider whose chat runtime cannot dispatch yet must not appear in the
- * picker, or the picker offers a model the chat handler refuses a second
- * later. That is the client half of a both-ends gate whose server half is
- * `resolveChatRuntime`. Env-only: the resolver is a process-wide singleton
- * created once at import time, with no project config in scope, so there is
- * no `.desde/config.json` key for this gate at all — see
- * `isNeutralChatEnabled`'s own doc comment in `dormant-surfaces.ts` for why.
- * The dispatch half reads the identical environment variable independently,
- * which is what keeps the two halves from drifting.
- */
-export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
-  if (descriptor.chatRuntime === "claude-agent-sdk") return true
-  return isNeutralChatEnabled()
-}
-
-/**
- * Live list from the `claude` binary. A query is opened on a prompt stream
+ * Live list from the `claude` command line tool on PATH. A query is opened on a prompt stream
  * that never yields, the models control request is answered, and the process
  * is closed: no turn runs, no tokens are spent. The spawn is the cost, which
  * is why this is cached and bounded by the resolver's timeout.
@@ -217,8 +208,10 @@ export function chatRuntimeServable(descriptor: ProviderDescriptor): boolean {
  * exactly the laziness `resolveChatRuntime`'s loaders exist to preserve.
  */
 export async function listViaClaudeCli(signal: AbortSignal): Promise<LiveModel[]> {
-  const claudeExecutablePath = resolveClaudeExecutablePath()
-  assertClaudeRuntimeReady(claudeExecutablePath)
+  const claudeExecutablePath = resolveClaudeOnPath()
+  if (claudeExecutablePath === undefined) {
+    throw new Error(SIDECAR_NO_BINARY_MESSAGE)
+  }
   const { query } = await import("@anthropic-ai/claude-agent-sdk")
   const idle = (async function* (): AsyncGenerator<SDKUserMessage, void> {
     await new Promise<void>((resolve) => {
@@ -230,7 +223,7 @@ export async function listViaClaudeCli(signal: AbortSignal): Promise<LiveModel[]
     prompt: idle,
     options: {
       cwd: tmpdir(),
-      ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+      pathToClaudeCodeExecutable: claudeExecutablePath,
       maxTurns: 1,
       tools: [],
     },
@@ -263,7 +256,7 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
   const failureTtlMs = deps.failureTtlMs ?? 60_000
   const timeoutMs = deps.timeoutMs ?? 8_000
   const log = deps.log ?? ((message: string) => console.error(`[model-catalog] ${message}`))
-  const includeDescriptor = deps.includeDescriptor ?? chatRuntimeServable
+  const includeDescriptor = deps.includeDescriptor ?? (() => true)
 
   let cached: { key: string; value: ResolvedModelCatalogs; at: number } | null = null
   let inFlight: { key: string; promise: Promise<ResolvedModelCatalogs> } | null = null
@@ -361,17 +354,21 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
       // it always has — this is display-only.
       //
       // The precedence id itself may not be SERVABLE (`descriptors` is
-      // already filtered by `chatRuntimeServable`, e.g. a neutral-chat-only
-      // provider with the flag off) — pick the first precedence id that IS
-      // in `descriptors`, falling back to whichever descriptor is servable
-      // at all, rather than unconditionally trusting
+      // already filtered by `includeDescriptor`, e.g. a test that narrows
+      // the servable set) — pick the first precedence id that IS in
+      // `descriptors`, falling back to whichever descriptor is servable at
+      // all, rather than unconditionally trusting
       // `DEFAULT_PROVIDER_PRECEDENCE[0]`.
       const precedenceId = DEFAULT_PROVIDER_PRECEDENCE.find((id) =>
         descriptors.some((d) => d.id === id),
       )
       const fallback = precedenceId ? getDescriptor(precedenceId) : descriptors[0]
       if (fallback) logUnknownRateCardsOnce(fallback, fallback.staticCatalog)
-      return { catalogs: fallback ? [servedStaticCatalog(fallback)] : [], source: "static" }
+      return {
+        catalogs: fallback ? [servedStaticCatalog(fallback)] : [],
+        sourceByProvider: fallback ? { [fallback.id]: "static" } : {},
+        source: "static",
+      }
     }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -397,7 +394,13 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
         : results.some((r) => r.source === "cli")
           ? "cli"
           : "api"
-      return { catalogs, source }
+      // Index-aligned with `credentialed`/`results`: each provider's OWN
+      // source, not the aggregate weakest one above.
+      const sourceByProvider: Record<string, ModelCatalogSource> = {}
+      for (let i = 0; i < credentialed.length; i++) {
+        sourceByProvider[credentialed[i].id] = results[i].source
+      }
+      return { catalogs, sourceByProvider, source }
     } finally {
       clearTimeout(timer)
     }

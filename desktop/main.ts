@@ -24,14 +24,10 @@ import {
   type MenuItemConstructorOptions,
 } from "electron"
 import { buildAppMenuItem } from "./app-menu.js"
-import { createBootLog, type BootLog } from "./boot-log.js"
+import { createBootLog } from "./boot-log.js"
 import { spawnPayloadChild, PayloadBootFailure, SHUTDOWN_GRACE_MS, type PayloadChildHandle } from "./child.js"
 import { createAutoDownloadMutationQueue } from "./auto-download-mutation-queue.js"
 import { createChildShutdownCoordinator } from "./child-shutdown-coordinator.js"
-import { createClaudeRuntimeController, type ClaudeRuntimeController } from "./claude-runtime-controller.js"
-import { ClaudeRuntimeInstallError } from "./claude-runtime-installer.js"
-import { shouldDownloadClaudeRuntime } from "./claude-runtime-gate.js"
-import { readStoredCredentialState } from "./llm-credentials-read.js"
 import { COPYRIGHT_LINE } from "./copyright.js"
 import { openExternalIfSafe } from "./external-url-guard.js"
 import { shouldPromptMoveToApplications } from "./first-launch.js"
@@ -45,13 +41,6 @@ import { getAutoDownload, setAutoDownload } from "./settings.js"
 import { broadcastUpdateState } from "./update-broadcast.js"
 import { shouldSkipUpdateChecks } from "./update-feed-guard.js"
 import { createUpdater, type Updater } from "./updater.js"
-import {
-  claudeAgentSdkPackageName,
-  claudeAgentSdkPlatformCandidates,
-  readInstalledClaudeAgentSdkVersion,
-  resolveAppSupportDir,
-} from "../src/editor/llm-providers/claude-runtime-location.js"
-import { readClaudeRuntimeExpectedIntegrity, resolveAnchorPayloadDir } from "./claude-runtime-expectation.js"
 
 // __dirname here is `desktop/dist/` (this file's bundled location, CJS
 // output — see scripts/build.mjs) in DEV. Two `..` reach the desktop package
@@ -110,9 +99,6 @@ const childShutdown = createChildShutdownCoordinator(() => killChildrenBestEffor
 // string, the same pattern every other `desktop:*` channel name in this file
 // already follows (each one is also independently re-typed in preload.ts).
 const UPDATE_STATE_CHANNEL = "desktop:updates:state"
-// Same duplication reasoning as UPDATE_STATE_CHANNEL above, for the claude
-// runtime installer's state — see preload.ts.
-const CLAUDE_RUNTIME_STATE_CHANNEL = "desktop:claude-runtime:state"
 // The navigation allowlist — see navigation-guard.ts's doc comment. Seeded
 // with the launcher's own origin once it's known (in `boot()`); extended
 // only via the `desktop:trust-origin` IPC channel, which the UI calls right
@@ -167,31 +153,6 @@ function buildPayload(payloadRoot: string): Promise<void> {
  * to recover short of deleting `.payload-cache` by hand.
  */
 const PAYLOAD_MANIFEST_FILENAME = "payload-manifest.json"
-
-/**
- * The short line logged whenever the gate decides the runtime is not
- * wanted — at boot (the gate's first decision) and again if the user
- * presses Retry from the settings menu and the answer hasn't changed. Retry
- * is otherwise a silent no-op; a user who clicked it deserves a trace of why
- * nothing happened, in the same place boot's own decision is recorded.
- */
-export const CLAUDE_RUNTIME_NOT_WANTED_NOTICE =
-  "AI chat runtime install skipped: a configured provider does not need it."
-
-/**
- * Read the credential state fresh at EVERY call, never once at boot. The
- * settings-menu retry exists precisely for the user who just changed something,
- * and a cached answer would tell them the app still refuses to fetch what they
- * now need.
- *
- * Reads and parses the credential file ONCE per call, through
- * `readStoredCredentialState` — the stored-keys and dev-mode readers used to
- * be called separately here, each re-reading and re-parsing the same file.
- */
-function claudeRuntimeWanted(): boolean {
-  const { stored, devMode } = readStoredCredentialState(homedir())
-  return shouldDownloadClaudeRuntime({ stored, devMode, env: process.env })
-}
 
 /** `ms` rendered as the coarsest whole unit that reads naturally — "3 minutes", "2 hours", "5 days" — not a precise duration. Good enough for a diagnostic log line, not meant for anything that parses it back. */
 function formatAge(ms: number): string {
@@ -476,11 +437,7 @@ function buildMenu(): Menu {
   return Menu.buildFromTemplate(template)
 }
 
-function registerIpcHandlers(
-  updater: Updater,
-  claudeRuntime: ClaudeRuntimeController,
-  bootLog: BootLog,
-): void {
+function registerIpcHandlers(updater: Updater): void {
   ipcMain.handle("desktop:pick-folder", async (): Promise<string | null> => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory"] })
@@ -574,23 +531,6 @@ function registerIpcHandlers(
   ipcMain.handle("desktop:settings:set-auto-download", (_event, value: boolean) =>
     autoDownloadMutations.mutate(value),
   )
-
-  ipcMain.handle("desktop:claude-runtime:get-state", () => claudeRuntime.getState())
-  // `handle`, not `on`: an install actually kicked off still reaches every
-  // subscriber through the SAME `onState` push every other trigger (boot, a
-  // prior failed attempt) uses, but a REFUSED retry has nothing else to tell
-  // the caller — no state change happens, so nothing is pushed through
-  // `onState` either. The reply is what lets the renderer show the same
-  // short notice `boot.log` gets, instead of the click doing nothing a
-  // second time.
-  ipcMain.handle("desktop:claude-runtime:retry", () => {
-    if (!claudeRuntimeWanted()) {
-      bootLog(CLAUDE_RUNTIME_NOT_WANTED_NOTICE)
-      return { started: false, skippedReason: CLAUDE_RUNTIME_NOT_WANTED_NOTICE }
-    }
-    claudeRuntime.ensure()
-    return { started: true }
-  })
 }
 
 /**
@@ -614,10 +554,10 @@ function fatalBoot(err: unknown): void {
 }
 
 /**
- * Desktop settings live in `userData`, beside `boot.log` and the Claude
- * runtime — see settings.ts's doc comment for why not the CLI's own
- * directory. A function, not a constant, because `app.getPath` is only
- * meaningful once the app name is settled, and module load is too early.
+ * Desktop settings live in `userData`, beside `boot.log` — see settings.ts's
+ * doc comment for why not the CLI's own directory. A function, not a
+ * constant, because `app.getPath` is only meaningful once the app name is
+ * settled, and module load is too early.
  */
 function settingsDir(): string {
   return app.getPath("userData")
@@ -632,7 +572,7 @@ async function boot(): Promise<void> {
   // for the keychain-prompt-every-minute failure this produced). Fix
   // `process.env` itself, once, before anything below spawns: child.ts
   // spreads `process.env` into the payload child, and the dev-mode payload
-  // build and the claude-runtime installer spawn from this process too.
+  // build spawns from this process too.
   // The shell is detached (so a hung rc file's whole process group can be
   // killed on timeout), which also means a quit during these few seconds
   // would otherwise leave it running with nothing to time it out.
@@ -725,94 +665,9 @@ async function boot(): Promise<void> {
   assertOutsidePackagedAsar(payloadRoot)
   await ensurePayload(payloadRoot, explicit, app.isPackaged)
 
-  // ── claude runtime (tasks/electron-app.md "fetch the claude binary on
-  // first run") ──────────────────────────────────────────────────────────
-  // The app-support dir is a pure path computation (no I/O) — safe to
-  // compute NOW and pass to spawnPayloadChild below regardless of whether
-  // the install itself has finished. `claudeRuntime.ensure()` is fired
-  // WITHOUT awaiting: boot must never block on a ~200MB network download
-  // (the brief's explicit constraint), and the CLI-side resolver
-  // (`resolve-claude-executable.ts`) does a live filesystem check on every
-  // `query()` call rather than trusting a value cached at spawn time — see
-  // that module's doc comment for why the two never need to be
-  // synchronized more tightly than this.
-  const claudeRuntimeAppSupportDir = resolveAppSupportDir({
-    home: homedir(),
-    platform: process.platform,
-    appName: PRODUCT_NAME,
-    env: process.env,
-  })
-  const claudeRuntimeConfig = (() => {
-    try {
-      const sdkVersion = readInstalledClaudeAgentSdkVersion(join(payloadRoot, "package.json"))
-      // The signed-anchor integrity expectation (F1): the payload lockfile
-      // inside the code-signed bundle records the sha512 SRI for the exact
-      // platform-package tarball the installer will fetch. Read here — same
-      // fail-closed IIFE as the version read — so a payload whose lockfile
-      // is missing/mismatched yields a controller that REFUSES to install
-      // rather than installing unverified. IMPORTANT (F4): in a packaged
-      // build the anchor is read from `<resourcesPath>/server`, NEVER from
-      // a `--payload`/env override — an override is an unsigned copy whose
-      // lockfile anyone able to influence startup can rewrite; the
-      // sdkVersion still comes from the payload actually being run, so an
-      // override with a different SDK version fails the reader's version
-      // check and installs are refused. See resolveAnchorPayloadDir's doc
-      // comment in claude-runtime-expectation.ts.
-      const [platformSuffix] = claudeAgentSdkPlatformCandidates(process.platform, process.arch)
-      const expectedIntegrity = readClaudeRuntimeExpectedIntegrity({
-        payloadDir: resolveAnchorPayloadDir({
-          payloadRoot,
-          packagedResourcesPath: app.isPackaged ? process.resourcesPath : null,
-        }),
-        packageName: claudeAgentSdkPackageName(platformSuffix),
-        sdkVersion,
-      })
-      return { sdkVersion, expectedIntegrity }
-    } catch (err) {
-      // Should be unreachable for a valid payload (build-server-package.mts
-      // always generates a package.json declaring this dependency, and its
-      // staging `npm install` writes the lockfile) — logged for diagnosis,
-      // but must never fail boot. The controller below still gets
-      // constructed so the IPC/UI surface behaves predictably; its ensureFn
-      // is swapped for one that fails fast with a clear cause instead of
-      // guessing at a version or downloading something it couldn't verify.
-      console.error(
-        "[desktop] could not determine the installed @anthropic-ai/claude-agent-sdk version/integrity — the AI chat runtime install will report an error:",
-        err,
-      )
-      return null
-    }
-  })()
-  const claudeRuntime = createClaudeRuntimeController({
-    appSupportDir: claudeRuntimeAppSupportDir,
-    sdkVersion: claudeRuntimeConfig?.sdkVersion ?? "unknown",
-    expectedIntegrity: claudeRuntimeConfig?.expectedIntegrity ?? "",
-    ...(claudeRuntimeConfig === null
-      ? {
-          ensureFn: () =>
-            Promise.reject(
-              new ClaudeRuntimeInstallError(
-                "unknown",
-                `Could not determine the installed Claude Agent SDK version or its download checksum — ` +
-                  `this copy of ${PRODUCT_NAME}'s server payload may be corrupted. Try reinstalling ${PRODUCT_NAME}.`,
-              ),
-            ),
-        }
-      : {}),
-  })
-  claudeRuntime.onState((state) => {
-    broadcastUpdateState(CLAUDE_RUNTIME_STATE_CHANNEL, state, BrowserWindow.getAllWindows())
-  })
-  if (claudeRuntimeWanted()) {
-    claudeRuntime.ensure()
-  } else {
-    bootLog(CLAUDE_RUNTIME_NOT_WANTED_NOTICE)
-  }
-
   childHandle = await spawnPayloadChild({
     execPath: process.execPath,
     payloadRoot,
-    claudeRuntimeAppSupportDir,
     // NOT process.cwd() — Electron main's own cwd depends on how it was
     // launched (`desktop/` under `npm --prefix desktop run …`, the repo
     // root, or whatever a packaged app's OS-level launch happens to set)
@@ -856,7 +711,7 @@ async function boot(): Promise<void> {
   const launcherOrigin = loopbackHttpOrigin(childHandle.url)
   if (launcherOrigin) trustedOrigins.add(launcherOrigin)
 
-  registerIpcHandlers(updater, claudeRuntime, bootLog)
+  registerIpcHandlers(updater)
   createWindow(childHandle.url)
   Menu.setApplicationMenu(buildMenu())
 

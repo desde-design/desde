@@ -1580,7 +1580,7 @@ export function useEditorEditing({
       if (selectors.length === 0) {
         // AN EMPTY INPUT IS A CLEAR, and it is answered here rather than by
         // the round trip below. `pin_selections` documents an empty array as
-        // the way to clear (`src/editor/agent-chat-sdk/system-prompt.ts`), and
+        // the way to clear (`src/editor/agent-chat/system-prompt.ts`), and
         // the adapter's `selectMany` returns early for it without sending
         // anything, so there is no reply for the empty-list branch further
         // down to read. That branch is about a read that WAS sent and came

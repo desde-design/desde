@@ -19,7 +19,7 @@ import { z } from 'zod'
 import {
   isSecretAgentPath,
   secretPathOmissionNote,
-} from '../agent-chat-sdk/protected-paths'
+} from '../agent-chat/protected-paths'
 import { resolveRepoPath } from '../agent-tools/read-tools'
 
 import { readRegularFile } from './read-regular-file'

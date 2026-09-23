@@ -29,6 +29,12 @@ export const ANTHROPIC_MODEL_CATALOG: ProviderModelCatalog = {
       effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
     },
     {
+      id: 'claude-opus-5-5',
+      label: 'Opus 5.5',
+      description: 'Deep reasoning, long-horizon work',
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    },
+    {
       id: 'claude-opus-5',
       label: 'Opus 5',
       description: 'Deep reasoning, long-horizon work',
@@ -61,3 +67,10 @@ export const ANTHROPIC_MODEL_CATALOG: ProviderModelCatalog = {
     },
   ],
 }
+
+/**
+ * Fallback default model id when a caller (or `LLMConfig`) does not pin one.
+ * Moved here 2026-09-23 from the now-deleted `anthropic-provider.ts`, next
+ * to the catalog it is a fallback for.
+ */
+export const ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-4-6'

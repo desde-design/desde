@@ -19,9 +19,13 @@
  * is that a bump stays a one-file migration.
  *
  * Deliberate behaviour notes:
- *  - `TextBlock.cacheHint` is dropped, as it was on the fetch provider. OpenAI
- *    has automatic prefix caching and no breakpoint API, so the caller still
- *    benefits without a marker on the wire.
+ *  - `TextBlock.cacheHint` is dropped unless the descriptor sets `cacheControl:
+ *    'anthropic'`, as it was on the fetch provider. OpenAI has automatic prefix
+ *    caching and no breakpoint API, so the caller still benefits without a
+ *    marker on the wire and `cacheControl` is left unset for it. Anthropic's
+ *    caching is breakpoint-based, so a marked system block is sent as a
+ *    `SystemModelMessage` carrying `providerOptions.anthropic.cacheControl`
+ *    instead of being flattened to a plain string.
  *  - Reasoning deltas are emitted as events but are NOT appended to the
  *    assistant message. They are display-only; replaying a reasoning summary
  *    as assistant text on the next step would corrupt the transcript.
@@ -34,6 +38,13 @@
  *    same `function_call_output` and the flag itself does not reach the
  *    model. Anthropic's `is_error` does survive, so without the marker the
  *    two lanes disagreed.
+ *  - Server tools (the vendor-run web tools, `ToolDef` of kind `server`) are
+ *    the one exception to "no `execute`, the loop runs it": the VENDOR runs
+ *    them inside the same response. Their call and result arrive as
+ *    `providerExecuted` stream parts and become `server_tool_use` /
+ *    `server_tool_result` blocks, never a pending call. This file stays
+ *    vendor-free about them: the descriptor's own `serverTool` factory
+ *    (`ai-sdk-anthropic.ts`, `ai-sdk-openai.ts`) builds each one.
  *  - `result.stream` is used, not `result.fullStream`, and `result.usage`, not
  *    `result.totalUsage`: both of the latter are deprecated in ai@7. The one
  *    surviving `totalUsage` is the field name on the `finish` stream part,
@@ -49,11 +60,14 @@ import {
   RetryError,
   streamText,
   tool,
+  type AssistantModelMessage,
   type FinishReason,
   type JSONValue,
   type LanguageModel,
   type LanguageModelUsage,
   type ModelMessage,
+  type SystemModelMessage,
+  type Tool,
   type ToolSet,
 } from 'ai'
 
@@ -79,12 +93,15 @@ import type {
   Message,
   ProviderEvent,
   StopReason,
+  ServerToolDef,
+  ServerToolId,
   StreamOpts,
   SystemContent,
   ToolDef,
   Usage,
   UserContent,
 } from './types'
+import { SERVER_TOOL_IDS } from './types'
 
 export interface AiSdkProviderOptions {
   /** Stable provider id, e.g. 'openai'. Becomes `LLMProvider.name`. */
@@ -108,6 +125,21 @@ export interface AiSdkProviderOptions {
    * retention, is set here for exactly that reason.
    */
   defaultProviderOptions?: Record<string, JSONValue>
+  /**
+   * Which vendor's breakpoint caching `TextBlock.cacheHint` maps to. Absent
+   * means the hint is dropped (OpenAI caches prefixes automatically and has no
+   * breakpoint API). 'anthropic' emits `providerOptions.anthropic.cacheControl`
+   * on the marked system block.
+   */
+  cacheControl?: 'anthropic'
+  /**
+   * Builds the vendor's own tool for a server def (`web_search`,
+   * `web_fetch`). Supplied by the vendor file, so this adapter never names a
+   * vendor tool factory. Returns `undefined` for an id the vendor does not
+   * have (OpenAI has no fetch tool), and the def is then left out of the
+   * request. Absent entirely means the provider serves no server tools.
+   */
+  serverTool?: (def: ServerToolDef) => Tool | undefined
 }
 
 export class AiSdkProvider implements LLMProvider {
@@ -116,6 +148,8 @@ export class AiSdkProvider implements LLMProvider {
   private readonly languageModel: (modelId: string) => LanguageModel
   private readonly providerOptionsKey: string
   private readonly defaultProviderOptions: Record<string, JSONValue> | undefined
+  private readonly cacheControl: 'anthropic' | undefined
+  private readonly serverTool: ((def: ServerToolDef) => Tool | undefined) | undefined
 
   constructor(opts: AiSdkProviderOptions) {
     this.name = opts.name
@@ -123,6 +157,52 @@ export class AiSdkProvider implements LLMProvider {
     this.languageModel = opts.languageModel
     this.providerOptionsKey = opts.providerOptionsKey
     this.defaultProviderOptions = opts.defaultProviderOptions
+    this.cacheControl = opts.cacheControl
+    this.serverTool = opts.serverTool
+  }
+
+  private cachedServerToolIds: ReadonlyArray<ServerToolId> | undefined
+
+  /**
+   * The ids the `serverTool` factory accepts, found by asking it. Derived
+   * rather than declared beside the factory, so the two cannot drift: the
+   * factory IS what decides whether a def reaches the request. The vendor
+   * factories are pure option mappings, so asking has no side effect.
+   * Computed on first read, not in the constructor.
+   */
+  get serverToolIds(): ReadonlyArray<ServerToolId> {
+    if (this.cachedServerToolIds === undefined) {
+      const factory = this.serverTool
+      this.cachedServerToolIds = factory
+        ? SERVER_TOOL_IDS.filter((id) => factory({ kind: 'server', id }) !== undefined)
+        : []
+    }
+    return this.cachedServerToolIds
+  }
+
+  /**
+   * The `system` argument for one request. A plain string unless the
+   * descriptor was built with `cacheControl: 'anthropic'` AND at least one
+   * block is marked `cacheHint: 'ephemeral'` — otherwise this is exactly
+   * `flattenToString`, so OpenAI (and Anthropic without a marked block) keeps
+   * today's behaviour byte-for-byte. When it does apply, EVERY block becomes
+   * its own `SystemModelMessage` (not just the marked one) because the SDK's
+   * `system` argument is either a single string or a full array of system
+   * messages — there is no way to send "some of the system prompt as a
+   * string, the rest as messages" in one request.
+   */
+  private toSystem(system: SystemContent): string | SystemModelMessage[] {
+    if (typeof system === 'string') return system
+    if (this.cacheControl !== 'anthropic' || !system.some((b) => b.cacheHint === 'ephemeral')) {
+      return flattenToString(system)
+    }
+    return system.map((b) => ({
+      role: 'system' as const,
+      content: b.text,
+      ...(b.cacheHint === 'ephemeral'
+        ? { providerOptions: { [this.providerOptionsKey]: { cacheControl: { type: 'ephemeral' } } } }
+        : {}),
+    }))
   }
 
   /**
@@ -146,7 +226,7 @@ export class AiSdkProvider implements LLMProvider {
     const model = this.languageModel(opts.model ?? this.defaultModel)
     const base = {
       model,
-      system: flattenToString(opts.system),
+      system: this.toSystem(opts.system),
       prompt: flattenToString(opts.user),
       maxOutputTokens: opts.maxTokens ?? 8000,
       abortSignal: opts.signal,
@@ -200,7 +280,7 @@ export class AiSdkProvider implements LLMProvider {
       opts.responseFormat?.kind === 'json_schema' ? opts.responseFormat.schema : undefined
     const result = streamText({
       model,
-      system: flattenToString(opts.system),
+      system: this.toSystem(opts.system),
       prompt: flattenToString(opts.user),
       maxOutputTokens: opts.maxTokens ?? 8000,
       abortSignal: opts.signal,
@@ -238,9 +318,9 @@ export class AiSdkProvider implements LLMProvider {
     const model = this.languageModel(opts.model ?? this.defaultModel)
     const result = streamText({
       model,
-      system: flattenToString(opts.system),
+      system: this.toSystem(opts.system),
       messages: toModelMessages(opts.messages),
-      tools: toToolSet(opts.tools),
+      tools: toToolSet(opts.tools, this.serverTool),
       ...(opts.maxTokens !== undefined ? { maxOutputTokens: opts.maxTokens } : {}),
       // `StreamOpts.providerOptions` is deliberately `Record<string, unknown>`:
       // only the descriptor that produced it knows what its own vendor accepts.
@@ -285,8 +365,56 @@ export class AiSdkProvider implements LLMProvider {
           break
         case 'tool-call':
           flushText()
+          if (part.providerExecuted === true) {
+            // The vendor already ran it, inside this response. Recorded for
+            // the transcript and for replay; the loop must not run it again.
+            blocks.push({
+              type: 'server_tool_use',
+              id: part.toolCallId,
+              name: part.toolName,
+              input: part.input,
+              ...metadataOf(part.providerMetadata),
+            })
+            yield {
+              kind: 'server_tool_use',
+              id: part.toolCallId,
+              name: part.toolName,
+              input: part.input,
+            }
+            break
+          }
           blocks.push({ type: 'tool_use', id: part.toolCallId, name: part.toolName, input: part.input })
           yield { kind: 'tool_use', id: part.toolCallId, name: part.toolName, input: part.input }
+          break
+        case 'tool-result':
+        case 'tool-error': {
+          // Only a provider-executed result can reach here: our function
+          // tools carry no `execute`, so the library never produces a result
+          // for one. The guard keeps that an assertion rather than a guess.
+          if (part.providerExecuted !== true) break
+          flushText()
+          const isError = part.type === 'tool-error'
+          const output = isError ? part.error : part.output
+          blocks.push({
+            type: 'server_tool_result',
+            toolUseId: part.toolCallId,
+            name: part.toolName,
+            output,
+            ...(isError ? { isError: true } : {}),
+            ...metadataOf(part.providerMetadata),
+          })
+          yield {
+            kind: 'server_tool_result',
+            toolUseId: part.toolCallId,
+            name: part.toolName,
+            output,
+            ...(isError ? { isError: true } : {}),
+          }
+          break
+        }
+        case 'source':
+          // Search citations. The result block already carries every URL the
+          // vendor returned, so these add nothing the transcript needs.
           break
         case 'abort':
           aborted = true
@@ -305,7 +433,12 @@ export class AiSdkProvider implements LLMProvider {
 
     if (opts.signal?.aborted) aborted = true
 
-    yield { kind: 'usage', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }
+    // On an abort this is 0/0. The vendor reports usage only on its `finish`
+    // part, and an abort ends the stream before that part arrives, so there
+    // is no figure to read here. The vendor still billed the request: the
+    // neutral loop sees the zero and records an estimate in its place
+    // (`estimate-cut-off-usage.ts`).
+    yield { kind: 'usage', ...usage }
 
     // A finished response that said nothing is a failed step, not an empty
     // successful one.
@@ -447,6 +580,18 @@ function normalizeSchemaNode(node: unknown, makeNullable: boolean): unknown {
 /** Widen one schema node so `null` is a legal value for it. */
 function withNullAllowed(node: Record<string, unknown>): Record<string, unknown> {
   const out = { ...node }
+  // An enum constrains the VALUES as well as the type. Anthropic's
+  // structured-output validator refuses an enum next to a type ARRAY
+  // ("Enum value 'left' does not match declared type ['string', 'null']",
+  // measured live 2026-09-23 on the translate-goal schema), so a nullable
+  // enum is written as two branches instead: the caller's enum, or null.
+  if (Array.isArray(out.enum) && !out.enum.includes(null)) {
+    const { enum: values, type: enumType, ...rest } = out
+    return {
+      ...rest,
+      anyOf: [{ ...(enumType !== undefined ? { type: enumType } : {}), enum: values }, { type: 'null' }],
+    }
+  }
   const type = out.type
   if (typeof type === 'string') {
     if (type !== 'null') out.type = [type, 'null']
@@ -465,9 +610,6 @@ function withNullAllowed(node: Record<string, unknown>): Record<string, unknown>
     // there is nothing to widen. Leave it exactly as the caller wrote it.
     return out
   }
-  // An enum constrains the VALUES as well as the type, so a nullable enum
-  // has to list null among them or the vendor rejects the pair.
-  if (Array.isArray(out.enum) && !out.enum.includes(null)) out.enum = [...out.enum, null]
   return out
 }
 
@@ -515,7 +657,9 @@ function markAsError(value: string): string {
 
 function flattenToString(content: SystemContent | UserContent): string {
   if (typeof content === 'string') return content
-  // Cache hints are dropped here. See the file header.
+  // Cache hints are dropped here unless `cacheControl` is set. See the file
+  // header and `toSystem`, which is what routes a marked system block away
+  // from this function.
   return content.map((b) => b.text).join('\n\n')
 }
 
@@ -529,9 +673,37 @@ function safeJsonParse(text: string): unknown {
 }
 
 function toUsage(usage: LanguageModelUsage | undefined): Usage {
+  // `LanguageModelUsage.inputTokenDetails` is the normalized shape every
+  // provider's usage lands in (confirmed against the installed `ai`
+  // package's d.ts, and against both `@ai-sdk/anthropic` and
+  // `@ai-sdk/openai`'s usage converters): `cacheReadTokens` and
+  // `cacheWriteTokens` are populated straight off the vendor's own
+  // cache-read / cache-creation counters, so no provider-specific
+  // `providerMetadata` read is needed here.
+  //
+  // `usage.inputTokens` itself (the top-level field) is the GRAND TOTAL —
+  // fresh input tokens PLUS cache-read PLUS cache-write, confirmed in both
+  // converters above. `Usage.inputTokens` here must stay disjoint from the
+  // two cache counters, or `estimateUsageCost` double-bills cache tokens
+  // (once inside `inputTokens` at the full input rate, again at the cache
+  // rate). So this reads `noCacheTokens` — the split-out fresh count.
+  //
+  // `noCacheTokens` is optional independently of the cache counters, so the
+  // fallback subtracts whatever cache figures WERE reported from the total.
+  // Falling back to the bare total double-billed a vendor that reported a
+  // cache read without the fresh count. For a provider that reported no
+  // cache details at all, the subtraction takes nothing and the total IS the
+  // fresh count, as before.
+  const details = usage?.inputTokenDetails
+  const cacheRead = details?.cacheReadTokens
+  const cacheWrite = details?.cacheWriteTokens
   return {
-    inputTokens: usage?.inputTokens ?? 0,
+    inputTokens:
+      details?.noCacheTokens ??
+      Math.max(0, (usage?.inputTokens ?? 0) - (cacheRead ?? 0) - (cacheWrite ?? 0)),
     outputTokens: usage?.outputTokens ?? 0,
+    ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheCreationInputTokens: cacheWrite } : {}),
   }
 }
 
@@ -554,9 +726,36 @@ function mapFinishReason(finish: FinishReason | undefined): StopReason {
   }
 }
 
-function toToolSet(tools: readonly ToolDef[]): ToolSet {
+/**
+ * `providerMetadata` off a stream part, as the optional field the neutral
+ * block carries. Omitted when the vendor sent none, so a block without it
+ * compares equal to one built by hand.
+ */
+function metadataOf(
+  metadata: Record<string, unknown> | undefined,
+): { providerMetadata?: Record<string, unknown> } {
+  return metadata !== undefined && Object.keys(metadata).length > 0
+    ? { providerMetadata: metadata }
+    : {}
+}
+
+function toToolSet(
+  tools: readonly ToolDef[],
+  serverTool: ((def: ServerToolDef) => Tool | undefined) | undefined,
+): ToolSet {
   const set: ToolSet = {}
   for (const def of tools) {
+    if (def.kind === 'server') {
+      // Keyed by the id, which is also the name both vendors give the tool
+      // on the wire. That matters on REPLAY: `@ai-sdk/anthropic` maps a
+      // replayed call's name back to its own tool name through the CURRENT
+      // request's tool set, and falls back to the name itself when the tool
+      // is not declared this time (the user switched web search off between
+      // turns). Keying by the id makes both paths land on `web_search`.
+      const built = serverTool?.(def)
+      if (built !== undefined) set[def.id] = built
+      continue
+    }
     set[def.name] = tool({
       description: def.description,
       inputSchema: jsonSchema(def.inputSchema),
@@ -577,6 +776,9 @@ function toToolSet(tools: readonly ToolDef[]): ToolSet {
  * message, because a dropped result desynchronises the transcript and the model
  * then answers a question it never saw the answer to.
  */
+/** One part of an assistant `ModelMessage`'s content array. */
+type AssistantModelPart = Exclude<AssistantModelMessage['content'], string>[number]
+
 function toModelMessages(messages: readonly Message[]): ModelMessage[] {
   const toolNameById = new Map<string, string>()
   for (const msg of messages) {
@@ -589,16 +791,51 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
   const out: ModelMessage[] = []
   for (const msg of messages) {
     if (msg.role === 'assistant') {
-      const content = msg.content.map((block) =>
-        block.type === 'text'
-          ? ({ type: 'text', text: block.text } as const)
-          : ({
+      const content = msg.content.map((block): AssistantModelPart => {
+        switch (block.type) {
+          case 'text':
+            return { type: 'text', text: block.text }
+          case 'tool_use':
+            return {
               type: 'tool-call',
               toolCallId: block.id,
               toolName: block.name,
               input: block.input ?? {},
-            } as const),
-      )
+            }
+          // Server-tool blocks stay INSIDE the assistant message. The vendor
+          // produced the call and the result in one response, and both
+          // vendor mappings read them back from there: a `tool` role message
+          // is for results Desde produced, and the vendor would read this one
+          // as an answer to a function call it never made.
+          case 'server_tool_use':
+            return {
+              type: 'tool-call',
+              toolCallId: block.id,
+              toolName: block.name,
+              input: block.input ?? {},
+              providerExecuted: true,
+              ...(block.providerMetadata
+                ? { providerOptions: block.providerMetadata as Record<string, Record<string, JSONValue>> }
+                : {}),
+            }
+          case 'server_tool_result':
+            return {
+              type: 'tool-result',
+              toolCallId: block.toolUseId,
+              toolName: block.name,
+              // `error-json` for a vendor-reported failure, because the vendor
+              // validates a `json` output against its SUCCESS schema on the
+              // way back in, and an error payload fails that validation and
+              // takes the whole request down with it.
+              output: block.isError
+                ? { type: 'error-json', value: block.output as JSONValue }
+                : { type: 'json', value: block.output as JSONValue },
+              ...(block.providerMetadata
+                ? { providerOptions: block.providerMetadata as Record<string, Record<string, JSONValue>> }
+                : {}),
+            }
+        }
+      })
       out.push({ role: 'assistant', content })
       continue
     }
@@ -611,7 +848,7 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
     // on every vision turn for no difference on the wire.
     const userParts: Array<
       | { type: 'text'; text: string }
-      | { type: 'file'; data: string; mediaType: string }
+      | { type: 'file'; data: string; mediaType: string; filename?: string }
     > = []
     const toolParts: Array<{
       type: 'tool-result'
@@ -642,6 +879,13 @@ function toModelMessages(messages: readonly Message[]): ModelMessage[] {
         userParts.push({ type: 'text', text: block.text })
       } else if (block.type === 'image') {
         userParts.push({ type: 'file', data: block.data, mediaType: block.mediaType })
+      } else if (block.type === 'document') {
+        userParts.push({
+          type: 'file',
+          data: block.data,
+          mediaType: block.mediaType,
+          ...(block.name ? { filename: block.name } : {}),
+        })
       } else {
         const parts = typeof block.content === 'string' ? [] : block.content
         const images = parts.filter((c) => c.type === 'image')

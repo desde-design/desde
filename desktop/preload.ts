@@ -19,12 +19,7 @@
  */
 
 import { contextBridge, ipcRenderer } from "electron"
-import type {
-  DesktopBridge,
-  DesktopClaudeRuntimeState,
-  DesktopRestartOutcome,
-  DesktopUpdateState,
-} from "../src/types/desktop-bridge.js"
+import type { DesktopBridge, DesktopRestartOutcome, DesktopUpdateState } from "../src/types/desktop-bridge.js"
 
 const APP_VERSION_ARG_PREFIX = "--app-version="
 
@@ -35,8 +30,6 @@ function readAppVersion(argv: readonly string[]): string {
 
 /** Must match main.ts's own `UPDATE_STATE_CHANNEL` constant — see that file's doc comment on it. */
 const UPDATE_STATE_CHANNEL = "desktop:updates:state"
-/** Must match main.ts's own `CLAUDE_RUNTIME_STATE_CHANNEL` constant. */
-const CLAUDE_RUNTIME_STATE_CHANNEL = "desktop:claude-runtime:state"
 
 /** The slice of `ipcRenderer` this bridge actually calls — narrow on purpose so a test double doesn't need to fake the whole module. */
 export interface IpcRendererLike {
@@ -90,21 +83,6 @@ export function buildDesktopBridge(ipc: IpcRendererLike, argv: readonly string[]
       checkForUpdates: () => ipc.invoke("desktop:updates:check") as Promise<{ performed: boolean }>,
       getAutoDownload: () => ipc.invoke("desktop:settings:get-auto-download") as Promise<boolean>,
       setAutoDownload: (value) => ipc.invoke("desktop:settings:set-auto-download", value) as Promise<void>,
-    },
-    claudeRuntime: {
-      getState: () =>
-        ipc.invoke("desktop:claude-runtime:get-state") as Promise<DesktopClaudeRuntimeState>,
-      onState: (cb) => {
-        const listener = (_event: unknown, state: DesktopClaudeRuntimeState) => cb(state)
-        ipc.on(CLAUDE_RUNTIME_STATE_CHANNEL, listener as (event: unknown, ...args: unknown[]) => void)
-        return () =>
-          ipc.removeListener(CLAUDE_RUNTIME_STATE_CHANNEL, listener as (event: unknown, ...args: unknown[]) => void)
-      },
-      retry: () =>
-        ipc.invoke("desktop:claude-runtime:retry") as Promise<{
-          started: boolean
-          skippedReason?: string
-        }>,
     },
     pickFolder: () => ipc.invoke("desktop:pick-folder") as Promise<string | null>,
     // `invoke`, not `send` — the caller (useLauncherApi's openPath) awaits

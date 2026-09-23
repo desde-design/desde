@@ -34,6 +34,7 @@ const ADAPTIVE_THINKING_MODELS: readonly string[] = [
   'claude-opus-4-6',
   'claude-opus-4-7',
   'claude-opus-4-8',
+  'claude-opus-5-5',
   'claude-opus-5',
   'claude-sonnet-4-6',
   'claude-sonnet-5',
@@ -56,4 +57,35 @@ export function supportsAnthropicAdaptiveThinking(model: string): boolean {
   return ADAPTIVE_THINKING_MODELS.some(
     (family) => model === family || model.startsWith(`${family}-`),
   )
+}
+
+/**
+ * Pick the extended-thinking config for an ANTHROPIC model. Adaptive-thinking
+ * models get `{type:'adaptive'}`, which is what `effort` modulates; older
+ * generations get a bounded fixed budget so thinking still surfaces.
+ *
+ * Not reachable for a non-Anthropic session: the SDK runtime is the only
+ * caller of the fixed-budget branch, and `resolveChatRuntime` only routes
+ * `claude-agent-sdk` descriptors to it. The Anthropic descriptor's
+ * `effort.toRequest` (neutral lane) also calls this, for the same model id.
+ *
+ * The two return shapes match `anthropicLanguageModelOptions`'s `thinking`
+ * union in `@ai-sdk/anthropic` 4.0.60: the `adaptive` member declares
+ * `display`, but the `enabled` member declares only `type` and
+ * `budgetTokens` — no `display` field exists there. Sending it anyway isn't
+ * an error (the schema runs in zod strip mode, so the extra key is silently
+ * dropped), but it claims a knob the fixed-budget branch doesn't have.
+ */
+export function resolveAnthropicThinkingConfig(
+  model: string,
+  adaptiveHint?: boolean,
+):
+  | { type: 'adaptive'; display: 'summarized' }
+  | { type: 'enabled'; budgetTokens: number } {
+  // The catalog's own answer wins over the family rule: a live source that
+  // says `sonnet` thinks adaptively knows which Sonnet it means.
+  if (adaptiveHint ?? supportsAnthropicAdaptiveThinking(model)) {
+    return { type: 'adaptive', display: 'summarized' }
+  }
+  return { type: 'enabled', budgetTokens: 4000 }
 }

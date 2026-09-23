@@ -177,9 +177,9 @@ describe('applyContextBudget', () => {
     // assistant message. Anthropic's Messages API answers that with
     // `messages: first message must use the "user" role`; OpenAI accepts it,
     // so the rule is Anthropic's and both lanes now satisfy it. Anthropic
-    // reaches this runtime through `EDITOR_CHAT_RUNTIME_OVERRIDE=neutral`, and
-    // the 400 would be permanent for the session, because every later turn
-    // replays the same over-budget history.
+    // reaches this runtime by default (any key present sends dispatch here,
+    // not to the sidecar), and the 400 would be permanent for the session,
+    // because every later turn replays the same over-budget history.
     const messages: Message[] = []
     for (let i = 0; i < 12; i++) {
       messages.push({ role: 'user', content: [{ type: 'text', text: `ask ${i} ${'u'.repeat(400)}` }] })

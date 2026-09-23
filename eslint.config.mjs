@@ -64,6 +64,53 @@ const eslintConfig = defineConfig([
       ],
     },
   },
+  // The Claude Agent SDK lives behind ONE directory. It is the runtime for the
+  // sidecar chat lane (`src/editor/agent-chat-sidecar/`) that supervises the
+  // local `claude` binary — everything else that needs an LLM goes through
+  // the vendor-neutral `LLMProvider` seam instead, same reasoning as the AI
+  // SDK fence above. `editor-cli/src/server/model-catalog-source.ts` gets the
+  // one named exception: `listViaClaudeCli` dynamically imports `query` to
+  // list models over the local binary without pulling the SDK onto the boot
+  // graph — see `agent-sdk-import-boundary.test.ts`. Also ignores
+  // `tasks/scripts/**/*.mts` and `scripts/**/*.mts`, the same dev-only live
+  // smoke / probe harnesses carved out below: they run manually via `tsx`
+  // against the real `claude` binary to MEASURE the SDK directly (e.g.
+  // `sidecar-builtins-off-spike.mts`, `sidecar-read-naming-probe.mts`), are
+  // never imported by product code, and ship in no bundle.
+  {
+    ignores: [
+      "src/editor/agent-chat-sidecar/**",
+      "editor-cli/src/server/model-catalog-source.ts",
+      "tasks/scripts/**/*.mts",
+      "scripts/**/*.mts",
+    ],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@anthropic-ai/claude-agent-sdk",
+              message:
+                "Import the Claude Agent SDK only from src/editor/agent-chat-sidecar/**. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
+            },
+          ],
+        },
+      ],
+      // `no-restricted-imports` does not see an `import()` EXPRESSION — see
+      // the matching comment on the AI SDK fence above.
+      // `agent-sdk-import-boundary.test.ts` covers the same gap at test time.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "ImportExpression > Literal[value='@anthropic-ai/claude-agent-sdk']",
+          message:
+            "Import the Claude Agent SDK only from src/editor/agent-chat-sidecar/**. A dynamic import() is still an import. Elsewhere, depend on the vendor-neutral LLMProvider in src/editor/llm-providers/types.ts.",
+        },
+      ],
+    },
+  },
   // Dev-only live smoke / probe harnesses. They drive Playwright `page.evaluate`,
   // whose results are inherently `any` at the boundary; forcing types on these
   // throwaway scripts is noise, not safety. Not shipped in any bundle.

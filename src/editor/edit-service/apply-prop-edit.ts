@@ -47,7 +47,7 @@ export interface ApplyPropEditInput {
  * by tracing the binding to its definition (a local ref/const) and editing
  * there. The edit handler (`editor-cli/src/server/edit-handler.ts`) consumes
  * this hint to transparently fall back to the agent mini-turn
- * (`src/editor/agent-chat-sdk/edit-fix-mini-turn.ts`); the LLM can refuse too,
+ * (`src/editor/agent-chat/edit-fix-mini-turn.ts`); the LLM can refuse too,
  * in which case the user sees the combined reason.
  *
  * Kinds:

@@ -120,14 +120,6 @@ function makeBridge(
       getAutoDownload: async () => autoDownload,
       setAutoDownload: async (value) => ctx.log("setAutoDownload", value),
     },
-    claudeRuntime: {
-      getState: async () => ({ phase: "ready" }),
-      onState: () => () => {},
-      retry: async () => {
-        ctx.log("claudeRuntime.retry")
-        return { started: true }
-      },
-    },
     pickFolder: async () => null,
   }
 }

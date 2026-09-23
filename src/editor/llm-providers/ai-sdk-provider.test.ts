@@ -11,8 +11,12 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { MockLanguageModelV4 } from 'ai/test'
+import { createAnthropic } from '@ai-sdk/anthropic'
+import { createOpenAI } from '@ai-sdk/openai'
 import { AiSdkProvider, APICallError, RetryError } from './ai-sdk-provider'
-import type { ProviderEvent } from './types'
+import { anthropicServerTool } from './ai-sdk-anthropic'
+import { openAiServerTool } from './ai-sdk-openai'
+import { SERVER_TOOL_MAX_USES, type Message, type ProviderEvent } from './types'
 
 /**
  * `streamText` itself, mocked so ONE test (the mid-stream abort case below)
@@ -70,6 +74,33 @@ function usageOf(inputTokens: number, outputTokens: number) {
       noCache: inputTokens,
       cacheRead: undefined,
       cacheWrite: undefined,
+    },
+    outputTokens: { total: outputTokens, text: outputTokens, reasoning: undefined },
+  }
+}
+
+/**
+ * Same v4 raw usage shape as `usageOf`, but with the cache-read/cache-write
+ * nested fields populated. This is what `@ai-sdk/anthropic`'s
+ * `convertAnthropicUsage` produces from the vendor's own
+ * `cache_read_input_tokens` / `cache_creation_input_tokens` fields
+ * (checked against the installed `@ai-sdk/anthropic` source): the `ai`
+ * package's `streamText` then normalizes it via `asLanguageModelUsage`
+ * into the `finish` stream part's `totalUsage.inputTokenDetails`
+ * (`cacheReadTokens` / `cacheWriteTokens`), which is what `toUsage` reads.
+ */
+function usageWithCacheOf(
+  inputTokens: number,
+  outputTokens: number,
+  cacheRead: number,
+  cacheWrite: number,
+) {
+  return {
+    inputTokens: {
+      total: inputTokens + cacheRead + cacheWrite,
+      noCache: inputTokens,
+      cacheRead,
+      cacheWrite,
     },
     outputTokens: { total: outputTokens, text: outputTokens, reasoning: undefined },
   }
@@ -355,6 +386,70 @@ describe('AiSdkProvider.streamConversation', () => {
     expect(done.usage).toEqual({ inputTokens: 9, outputTokens: 7 })
   })
 
+  it('reads cache-read and cache-creation tokens off the finish part and includes them on both usage events', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: streamOf([
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: '1' },
+        { type: 'text-delta', id: '1', delta: 'ok' },
+        { type: 'text-end', id: '1' },
+        {
+          type: 'finish',
+          finishReason: finishOf('stop'),
+          usage: usageWithCacheOf(10, 2, 1000, 500),
+        },
+      ]),
+    })
+    const events = await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [],
+      }),
+    )
+    // `inputTokens` stays the NON-cached count (10), disjoint from the two
+    // cache counters below — the raw v4 usage's `total` field (1510) folds
+    // fresh + cache-read + cache-write together, and `toUsage` un-folds it
+    // via `inputTokenDetails.noCacheTokens` so pricing never double-bills
+    // a cache token once as a full-rate input token and again at the
+    // cache rate.
+    const usageEvent = events.find((e) => e.kind === 'usage')
+    if (usageEvent?.kind !== 'usage') throw new Error('expected usage')
+    expect(usageEvent).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
+    const done = events.find((e) => e.kind === 'message_complete')
+    if (done?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(done.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadInputTokens: 1000,
+      cacheCreationInputTokens: 500,
+    })
+  })
+
+  it('keeps input disjoint from the cache when a vendor reports a cache read but no fresh count', async () => {
+    // `noCacheTokens` is optional on its own. A provider package or gateway
+    // that reports `cacheRead` without it must not have the GRAND TOTAL read
+    // as fresh input, or the cache read is billed twice.
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [{ type: 'text', text: 'ok' }],
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage: {
+          inputTokens: { total: 1000, noCache: undefined, cacheRead: 800, cacheWrite: undefined },
+          outputTokens: { total: 5, text: 5, reasoning: undefined },
+        },
+        warnings: [],
+      }),
+    })
+    const res = await providerFor(model).complete({ system: 's', user: 'u' })
+    expect(res.usage).toEqual({ inputTokens: 200, outputTokens: 5, cacheReadInputTokens: 800 })
+  })
+
   it('passes tools as definitions with no execute, so the library returns the call instead of running it', async () => {
     const model = new MockLanguageModelV4({
       doStream: answeredStream(),
@@ -484,6 +579,33 @@ describe('AiSdkProvider.streamConversation', () => {
     expect(user.content[1]).toMatchObject({ type: 'file', mediaType: 'image/png' })
   })
 
+  it('sends a DocumentContent block as a file part with its filename', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'document', mediaType: 'application/pdf', data: 'QUJD', name: 'a.pdf' },
+            ],
+          },
+        ],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const user = prompt[1] as unknown as { content: Array<Record<string, unknown>> }
+    expect(user.content[0]).toMatchObject({
+      type: 'file',
+      mediaType: 'application/pdf',
+      filename: 'a.pdf',
+    })
+  })
+
   it('nests StreamOpts.providerOptions under the descriptor key', async () => {
     const model = new MockLanguageModelV4({
       doStream: answeredStream(),
@@ -497,6 +619,90 @@ describe('AiSdkProvider.streamConversation', () => {
       }),
     )
     expect(model.doStreamCalls[0]!.providerOptions).toEqual({ openai: { reasoningEffort: 'high' } })
+  })
+
+  it('maps an ephemeral cache hint on a system block to anthropic cacheControl', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    const provider = new AiSdkProvider({
+      name: 'anthropic',
+      defaultModel: 'm',
+      languageModel: () => model,
+      providerOptionsKey: 'anthropic',
+      cacheControl: 'anthropic',
+    })
+    await collect(
+      provider.streamConversation({
+        system: [{ type: 'text', text: 'SYS', cacheHint: 'ephemeral' }],
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const sys = prompt.filter((m) => m.role === 'system')
+    expect(sys).toHaveLength(1)
+    expect(sys[0]).toMatchObject({
+      role: 'system',
+      content: 'SYS',
+      providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+    })
+  })
+
+  it('drops the hint when cacheControl is not configured (OpenAI)', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    await collect(
+      providerFor(model).streamConversation({
+        system: [{ type: 'text', text: 'SYS', cacheHint: 'ephemeral' }],
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const sys = prompt.filter((m) => m.role === 'system')
+    expect(sys).toHaveLength(1)
+    expect(sys[0]).toMatchObject({ role: 'system', content: 'SYS' })
+    expect((sys[0] as { providerOptions?: unknown }).providerOptions).toBeUndefined()
+  })
+
+  it('marks only the hinted block when the system prompt has several, in order', async () => {
+    // The production caller (`run-chat-turn-neutral.ts`) sends a two-block
+    // system: a cache-hinted prompt block followed by an unhinted notice
+    // block. `toSystem` maps EVERY block to its own `SystemModelMessage`
+    // once any block is hinted, so this proves the unhinted sibling does not
+    // pick up `providerOptions` by accident and that order survives the map.
+    const model = new MockLanguageModelV4({
+      doStream: answeredStream(),
+    })
+    const provider = new AiSdkProvider({
+      name: 'anthropic',
+      defaultModel: 'm',
+      languageModel: () => model,
+      providerOptionsKey: 'anthropic',
+      cacheControl: 'anthropic',
+    })
+    await collect(
+      provider.streamConversation({
+        system: [
+          { type: 'text', text: 'SYS', cacheHint: 'ephemeral' },
+          { type: 'text', text: 'NOTICE' },
+        ],
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    const sys = prompt.filter((m) => m.role === 'system')
+    expect(sys).toHaveLength(2)
+    expect(sys[0]).toMatchObject({
+      role: 'system',
+      content: 'SYS',
+      providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+    })
+    expect(sys[1]).toMatchObject({ role: 'system', content: 'NOTICE' })
+    expect((sys[1] as { providerOptions?: unknown }).providerOptions).toBeUndefined()
   })
 
   it('reports an aborted stream as an error stop with the work so far preserved', async () => {
@@ -540,6 +746,15 @@ describe('AiSdkProvider.streamConversation', () => {
     // is kept, not discarded, so the transcript shows what the model had
     // said when the user pressed Stop.
     expect(done.message.content).toEqual([{ type: 'text', text: 'partial' }])
+    // No `finish` part arrived, so the vendor never reported usage and the
+    // provider has only zeros to give. The neutral loop reads that zero as
+    // "not reported" and records an estimate (`estimate-cut-off-usage.ts`).
+    expect(events.find((e) => e.kind === 'usage')).toEqual({
+      kind: 'usage',
+      inputTokens: 0,
+      outputTokens: 0,
+    })
+    expect(done.usage).toEqual({ inputTokens: 0, outputTokens: 0 })
   })
 
   it('falls back to the post-loop signal check when the stream ends with no abort part', async () => {
@@ -792,5 +1007,343 @@ describe('AiSdkProvider retry ownership', () => {
     await provider.streamComplete({ system: 's', user: 'u' })
     const completeOpts = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>
     expect(completeOpts).not.toHaveProperty('maxRetries')
+  })
+})
+
+/**
+ * Provider server tools: the web tools the VENDOR runs inside one response.
+ *
+ * The vendor factories are the real ones from the installed packages, built
+ * on a real `createAnthropic` / `createOpenAI` instance with a dummy key. No
+ * request leaves the process: the model is `MockLanguageModelV4`, which only
+ * records what the adapter asked for. That keeps the assertions on the exact
+ * `LanguageModelV4ProviderTool` shape (`type: 'provider'`, the vendor's own
+ * dotted id) instead of on a hand-written stand-in for it.
+ */
+describe('AiSdkProvider server tools', () => {
+  const anthropicTools = createAnthropic({ apiKey: 'sk-ant-test' }).tools
+  const openaiTools = createOpenAI({ apiKey: 'sk-test' }).tools
+
+  function anthropicProviderFor(model: MockLanguageModelV4): AiSdkProvider {
+    return new AiSdkProvider({
+      name: 'anthropic',
+      defaultModel: 'claude-opus-4-8',
+      languageModel: () => model,
+      providerOptionsKey: 'anthropic',
+      serverTool: (def) => anthropicServerTool(def, anthropicTools),
+    })
+  }
+
+  it('reports the server tool ids its factory accepts, and none without a factory', () => {
+    const noModel = new MockLanguageModelV4({ doStream: answeredStream() })
+    expect(anthropicProviderFor(noModel).serverToolIds).toEqual(['web_search', 'web_fetch'])
+    const openai = new AiSdkProvider({
+      name: 'openai',
+      defaultModel: 'gpt-5.6',
+      languageModel: () => noModel,
+      providerOptionsKey: 'openai',
+      serverTool: (def) => openAiServerTool(def, openaiTools),
+    })
+    expect(openai.serverToolIds).toEqual(['web_search'])
+    expect(providerFor(noModel).serverToolIds).toEqual([])
+  })
+
+  it('bounds web_search at SERVER_TOOL_MAX_USES when the def names no cap', async () => {
+    const model = new MockLanguageModelV4({ doStream: answeredStream() })
+    await collect(
+      anthropicProviderFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [{ kind: 'server', id: 'web_search' }],
+      }),
+    )
+    expect(model.doStreamCalls[0]!.tools).toEqual([
+      {
+        type: 'provider',
+        id: 'anthropic.web_search_20260318',
+        name: 'web_search',
+        args: { maxUses: SERVER_TOOL_MAX_USES },
+      },
+    ])
+    expect(SERVER_TOOL_MAX_USES).toBe(8)
+  })
+
+  it('declares a web_search server def as the vendor provider tool, with its options', async () => {
+    const model = new MockLanguageModelV4({ doStream: answeredStream() })
+    await collect(
+      anthropicProviderFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [
+          { name: 'Read', description: 'Read', inputSchema: { type: 'object', properties: {} } },
+          { kind: 'server', id: 'web_search', allowedDomains: ['example.com'], maxUses: 3 },
+        ],
+      }),
+    )
+    const tools = model.doStreamCalls[0]!.tools!
+    expect(tools).toHaveLength(2)
+    expect(tools[0]).toMatchObject({ type: 'function', name: 'Read' })
+    expect(tools[1]).toEqual({
+      type: 'provider',
+      id: 'anthropic.web_search_20260318',
+      name: 'web_search',
+      args: { allowedDomains: ['example.com'], maxUses: 3 },
+    })
+  })
+
+  it('declares web_fetch with the allowlist as allowedDomains', async () => {
+    const model = new MockLanguageModelV4({ doStream: answeredStream() })
+    await collect(
+      anthropicProviderFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [{ kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] }],
+      }),
+    )
+    expect(model.doStreamCalls[0]!.tools).toEqual([
+      {
+        type: 'provider',
+        id: 'anthropic.web_fetch_20260318',
+        name: 'web_fetch',
+        args: { allowedDomains: ['example.com'], maxUses: SERVER_TOOL_MAX_USES },
+      },
+    ])
+  })
+
+  it('declares OpenAI web_search with the domains as its filter, and skips web_fetch it does not have', async () => {
+    const model = new MockLanguageModelV4({ doStream: answeredStream() })
+    const provider = new AiSdkProvider({
+      name: 'openai',
+      defaultModel: 'gpt-5.6',
+      languageModel: () => model,
+      providerOptionsKey: 'openai',
+      serverTool: (def) => openAiServerTool(def, openaiTools),
+    })
+    await collect(
+      provider.streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [
+          { kind: 'server', id: 'web_search', allowedDomains: ['example.com'] },
+          { kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] },
+        ],
+      }),
+    )
+    expect(model.doStreamCalls[0]!.tools).toEqual([
+      {
+        type: 'provider',
+        id: 'openai.web_search',
+        name: 'web_search',
+        args: { filters: { allowedDomains: ['example.com'] } },
+      },
+    ])
+  })
+
+  it('leaves a server def out when the provider has no server-tool factory', async () => {
+    const model = new MockLanguageModelV4({ doStream: answeredStream() })
+    await collect(
+      providerFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [{ kind: 'server', id: 'web_search' }],
+      }),
+    )
+    expect(model.doStreamCalls[0]!.tools ?? []).toEqual([])
+  })
+
+  const FETCH_RESULT = {
+    type: 'web_fetch_result',
+    url: 'https://example.com/',
+    retrievedAt: '2026-09-22T00:00:00Z',
+    content: {
+      type: 'document',
+      title: 'Example Domain',
+      source: { type: 'text', mediaType: 'text/plain', data: 'Example Domain body' },
+    },
+  }
+
+  it('turns a provider-executed call and result into server events and blocks, in order, and never a pending tool_use', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: streamOf([
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: 't1' },
+        { type: 'text-delta', id: 't1', delta: 'Fetching.' },
+        { type: 'text-end', id: 't1' },
+        {
+          type: 'tool-call',
+          toolCallId: 'srvtoolu_1',
+          toolName: 'web_fetch',
+          input: '{"url":"https://example.com/"}',
+          providerExecuted: true,
+          providerMetadata: { anthropic: { caller: { type: 'direct' } } },
+        },
+        {
+          type: 'tool-result',
+          toolCallId: 'srvtoolu_1',
+          toolName: 'web_fetch',
+          result: FETCH_RESULT,
+        },
+        // A search result also streams `source` parts. They carry nothing
+        // the transcript needs, and must not crash the adapter.
+        { type: 'source', sourceType: 'url', id: 'src_1', url: 'https://example.com/', title: 'Example Domain' },
+        { type: 'text-start', id: 't2' },
+        { type: 'text-delta', id: 't2', delta: 'It is Example Domain.' },
+        { type: 'text-end', id: 't2' },
+        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
+      ]),
+    })
+    const events = await collect(
+      anthropicProviderFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'Fetch https://example.com/' }],
+        tools: [{ kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] }],
+      }),
+    )
+    expect(events.some((e) => e.kind === 'tool_use')).toBe(false)
+    const serverEvents = events.filter(
+      (e) => e.kind === 'server_tool_use' || e.kind === 'server_tool_result',
+    )
+    expect(serverEvents).toEqual([
+      {
+        kind: 'server_tool_use',
+        id: 'srvtoolu_1',
+        name: 'web_fetch',
+        input: { url: 'https://example.com/' },
+      },
+      { kind: 'server_tool_result', toolUseId: 'srvtoolu_1', name: 'web_fetch', output: FETCH_RESULT },
+    ])
+    const done = events.find((e) => e.kind === 'message_complete')
+    if (done?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(done.stopReason).toBe('end_turn')
+    expect(done.message.content).toEqual([
+      { type: 'text', text: 'Fetching.' },
+      {
+        type: 'server_tool_use',
+        id: 'srvtoolu_1',
+        name: 'web_fetch',
+        input: { url: 'https://example.com/' },
+        providerMetadata: { anthropic: { caller: { type: 'direct' } } },
+      },
+      { type: 'server_tool_result', toolUseId: 'srvtoolu_1', name: 'web_fetch', output: FETCH_RESULT },
+      { type: 'text', text: 'It is Example Domain.' },
+    ])
+  })
+
+  it('marks a vendor-reported server tool failure as an errored result', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: streamOf([
+        { type: 'stream-start', warnings: [] },
+        {
+          type: 'tool-call',
+          toolCallId: 'srvtoolu_2',
+          toolName: 'web_fetch',
+          input: '{"url":"https://example.com/"}',
+          providerExecuted: true,
+        },
+        {
+          type: 'tool-result',
+          toolCallId: 'srvtoolu_2',
+          toolName: 'web_fetch',
+          isError: true,
+          result: { type: 'web_fetch_tool_result_error', errorCode: 'url_not_accessible' },
+        },
+        { type: 'text-start', id: 't' },
+        { type: 'text-delta', id: 't', delta: 'Could not fetch it.' },
+        { type: 'text-end', id: 't' },
+        { type: 'finish', finishReason: finishOf('stop'), usage: USAGE },
+      ]),
+    })
+    const events = await collect(
+      anthropicProviderFor(model).streamConversation({
+        system: 's',
+        messages: [{ role: 'user', content: 'u' }],
+        tools: [{ kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] }],
+      }),
+    )
+    const result = events.find((e) => e.kind === 'server_tool_result')
+    expect(result).toEqual({
+      kind: 'server_tool_result',
+      toolUseId: 'srvtoolu_2',
+      name: 'web_fetch',
+      output: { type: 'web_fetch_tool_result_error', errorCode: 'url_not_accessible' },
+      isError: true,
+    })
+  })
+
+  it('replays server blocks INSIDE the assistant message as provider-executed parts, never as a tool message', async () => {
+    const model = new MockLanguageModelV4({ doStream: answeredStream() })
+    const messages: Message[] = [
+      { role: 'user', content: 'Fetch it' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Fetching.' },
+          {
+            type: 'server_tool_use',
+            id: 'srvtoolu_1',
+            name: 'web_fetch',
+            input: { url: 'https://example.com/' },
+            providerMetadata: { anthropic: { caller: { type: 'direct' } } },
+          },
+          { type: 'server_tool_result', toolUseId: 'srvtoolu_1', name: 'web_fetch', output: FETCH_RESULT },
+          {
+            type: 'server_tool_use',
+            id: 'srvtoolu_2',
+            name: 'web_fetch',
+            input: { url: 'https://example.com/missing' },
+          },
+          {
+            type: 'server_tool_result',
+            toolUseId: 'srvtoolu_2',
+            name: 'web_fetch',
+            output: { type: 'web_fetch_tool_result_error', errorCode: 'url_not_accessible' },
+            isError: true,
+          },
+          { type: 'text', text: 'It is Example Domain.' },
+        ],
+      },
+      { role: 'user', content: 'thanks' },
+    ]
+    await collect(
+      anthropicProviderFor(model).streamConversation({
+        system: 's',
+        messages,
+        tools: [{ kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] }],
+      }),
+    )
+    const prompt = model.doStreamCalls[0]!.prompt
+    expect(prompt.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user'])
+    const assistant = prompt[2] as { content: unknown[] }
+    expect(assistant.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'Fetching.' }),
+      expect.objectContaining({
+        type: 'tool-call',
+        toolCallId: 'srvtoolu_1',
+        toolName: 'web_fetch',
+        input: { url: 'https://example.com/' },
+        providerExecuted: true,
+        providerOptions: { anthropic: { caller: { type: 'direct' } } },
+      }),
+      expect.objectContaining({
+        type: 'tool-result',
+        toolCallId: 'srvtoolu_1',
+        toolName: 'web_fetch',
+        output: { type: 'json', value: FETCH_RESULT },
+      }),
+      expect.objectContaining({
+        type: 'tool-call',
+        toolCallId: 'srvtoolu_2',
+        providerExecuted: true,
+      }),
+      expect.objectContaining({
+        type: 'tool-result',
+        toolCallId: 'srvtoolu_2',
+        output: {
+          type: 'error-json',
+          value: { type: 'web_fetch_tool_result_error', errorCode: 'url_not_accessible' },
+        },
+      }),
+      expect.objectContaining({ type: 'text', text: 'It is Example Domain.' }),
+    ])
   })
 })

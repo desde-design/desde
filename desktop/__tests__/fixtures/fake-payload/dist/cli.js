@@ -15,12 +15,17 @@
 //   fail                    writes to stderr and exits 1 WITHOUT ever
 //                           printing the ready line.
 //
-// FIXTURE_ENV_DUMP_PATH (independent of FIXTURE_MODE): when set, writes
-// EDITOR_CLAUDE_RUNTIME_DIR's value (or the literal string "unset") to that
-// path before printing the ready line — lets child.test.ts assert on env
-// propagation via a file instead of racing the stdout stream (a listener
-// attached AFTER the ready-line promise resolves would miss data already
-// emitted on an already-flowing stream).
+// FIXTURE_ENV_DUMP_EXEC_PATH (independent of FIXTURE_MODE): when set,
+// writes EDITOR_CLAUDE_EXECUTABLE_PATH's value (or the literal string
+// "unset") to that path before printing the ready line — lets
+// child.test.ts assert on env propagation via a file instead of racing the
+// stdout stream (a listener attached AFTER the ready-line promise resolves
+// would miss data already emitted on an already-flowing stream). Proves
+// that spawnPayloadChild SCRUBS an INHERITED override (the F5 fix) rather
+// than passing it down to a child whose resolver would otherwise be
+// offered an arbitrary, content-unverified executable — desktop no longer
+// sets this variable itself (chat-runtime-consolidation task 28 removed
+// its own bundled `claude` install), so the scrub is now unconditional.
 const mode = process.env.FIXTURE_MODE ?? "ready"
 
 if (mode === "fail") {
@@ -28,17 +33,6 @@ if (mode === "fail") {
   process.exit(1)
 }
 
-if (process.env.FIXTURE_ENV_DUMP_PATH) {
-  require("node:fs").writeFileSync(
-    process.env.FIXTURE_ENV_DUMP_PATH,
-    process.env.EDITOR_CLAUDE_RUNTIME_DIR ?? "unset",
-  )
-}
-
-// Same pattern for EDITOR_CLAUDE_EXECUTABLE_PATH — lets child.test.ts prove
-// spawnPayloadChild SCRUBS the inherited override (the F5 fix) rather than
-// passing it down to a child whose resolver would otherwise be offered an
-// arbitrary, content-unverified executable.
 if (process.env.FIXTURE_ENV_DUMP_EXEC_PATH) {
   require("node:fs").writeFileSync(
     process.env.FIXTURE_ENV_DUMP_EXEC_PATH,

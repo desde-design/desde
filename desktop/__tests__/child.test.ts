@@ -170,25 +170,10 @@ describe("spawnPayloadChild", () => {
     await expect(handle.shutdown()).resolves.toBeUndefined()
   })
 
-  it("sets EDITOR_CLAUDE_RUNTIME_DIR on the child when claudeRuntimeAppSupportDir is given", async () => {
+  it("SCRUBS an inherited EDITOR_CLAUDE_EXECUTABLE_PATH from the child env (F5 — an inherited override must never reach a desktop child)", async () => {
     const dumpDir = mkdtempSync(join(tmpdir(), "child-env-dump-"))
     const dumpPath = join(dumpDir, "env.txt")
     const handle = await spawnFake({
-      claudeRuntimeAppSupportDir: "/fake/Library/Application Support/Desde",
-      env: { ...process.env, FIXTURE_MODE: "ready", FIXTURE_ENV_DUMP_PATH: dumpPath },
-    })
-    spawnedForCleanup.push(handle.child)
-    await handle.shutdown()
-
-    expect(readFileSync(dumpPath, "utf8")).toBe("/fake/Library/Application Support/Desde")
-    rmSync(dumpDir, { recursive: true, force: true })
-  })
-
-  it("SCRUBS an inherited EDITOR_CLAUDE_EXECUTABLE_PATH from the child env (F5 — the override must not reach a desktop child)", async () => {
-    const dumpDir = mkdtempSync(join(tmpdir(), "child-env-dump-"))
-    const dumpPath = join(dumpDir, "env.txt")
-    const handle = await spawnFake({
-      claudeRuntimeAppSupportDir: "/fake/Library/Application Support/Desde",
       env: {
         ...process.env,
         FIXTURE_MODE: "ready",
@@ -205,11 +190,11 @@ describe("spawnPayloadChild", () => {
     rmSync(dumpDir, { recursive: true, force: true })
   })
 
-  it("omits EDITOR_CLAUDE_RUNTIME_DIR entirely when claudeRuntimeAppSupportDir is not given (terminal-CLI parity)", async () => {
+  it("omits EDITOR_CLAUDE_EXECUTABLE_PATH entirely when nothing inherited it (terminal-CLI parity — desktop no longer sets it itself)", async () => {
     const dumpDir = mkdtempSync(join(tmpdir(), "child-env-dump-"))
     const dumpPath = join(dumpDir, "env.txt")
     const handle = await spawnFake({
-      env: { ...process.env, FIXTURE_MODE: "ready", FIXTURE_ENV_DUMP_PATH: dumpPath },
+      env: { ...process.env, FIXTURE_MODE: "ready", FIXTURE_ENV_DUMP_EXEC_PATH: dumpPath },
     })
     spawnedForCleanup.push(handle.child)
     await handle.shutdown()

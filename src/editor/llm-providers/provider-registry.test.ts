@@ -40,7 +40,7 @@ describe('the descriptor table', () => {
       expect(d.credentials.apiKeyEnvVar.length, d.id).toBeGreaterThan(0)
       expect(d.credentials.maskPrefix.length, d.id).toBeGreaterThan(0)
       expect(d.credentials.consoleUrl.startsWith('https://'), d.id).toBe(true)
-      expect(typeof d.capabilities.midTurnSteering, d.id).toBe('boolean')
+      expect(Array.isArray(d.capabilities.webTools), d.id).toBe(true)
       expect(typeof d.capabilities.vendorRateLimitEvents, d.id).toBe('boolean')
     }
   })

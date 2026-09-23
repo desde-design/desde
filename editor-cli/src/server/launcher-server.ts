@@ -47,7 +47,7 @@ import {
   LLM_CREDENTIALS_ROUTE,
   handleLlmCredentialsRoute,
 } from "./llm-credentials-handler.js"
-import { isClaudeRuntimeResolvable } from "./claude-runtime-available.js"
+import { isClaudeOnPath } from "../../../src/editor/agent-chat-sidecar/resolve-claude-on-path.js"
 import { VIEWER_PROBE_ROUTE, handleViewerProbe } from "./viewer-probe.js"
 import { readMachineViewerStatus } from "./machine-viewer-status.js"
 import {
@@ -446,7 +446,7 @@ async function route(
       return
     }
     await handleLlmCredentialsRoute(req, res, url, {
-      claudeRuntimeResolvable: isClaudeRuntimeResolvable(),
+      claudeOnPath: isClaudeOnPath(),
     })
     return
   }

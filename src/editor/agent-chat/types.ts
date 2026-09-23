@@ -12,6 +12,7 @@
  */
 
 import type { EffortLevel } from '../core/model-catalog'
+import type { Usage } from '../llm-providers/types'
 
 /**
  * Stable identifier for a chat session.
@@ -83,8 +84,12 @@ export interface ChatTurn {
    * (e.g. session resume after editor restart).
    */
   editProposals: ChatEditProposalRef[]
-  /** Token usage aggregated across all model calls in this turn. */
-  usage?: { inputTokens: number; outputTokens: number }
+  /**
+   * Token usage aggregated across all model calls in this turn. Carries
+   * cache-read / cache-creation counts too, when the provider reported
+   * them, so `costOfTurn`'s rate-card estimate can price them.
+   */
+  usage?: Usage
   /**
    * Model id used for this turn. Persisted so the session's
    * cost-ceiling computation can look up the right rate card — older
@@ -134,7 +139,7 @@ export interface ChatTurn {
  *
  * Deliberately NOT the full delivery record. Whether the model provably read
  * it is a live-turn concern (`takeUndeliveredSteers` in
- * `agent-chat-sdk/turn-input-channel.ts` decides that, and the client resubmits
+ * `agent-chat/turn-input-channel.ts` decides that, and the client resubmits
  * what could not be accounted for). What is persisted here is what the user
  * typed and where it sat in the conversation.
  *
@@ -161,14 +166,52 @@ export interface ChatSteeredMessage {
    * Stored rather than derived because there is nothing to derive it from
    * later — the ordering only exists while the turn is streaming. A renderer
    * splits `assistantContent` here so the steer appears where it happened
-   * instead of after the whole reply.
+   * instead of after the whole reply, and the neutral lane's history replay
+   * (`history-replay.ts`) splits it the same way for the model.
    */
   afterAssistantBlocks: number
 }
 
+/**
+ * One block of a turn's reply, in stream order.
+ *
+ * `server_tool_use` / `server_tool_result` are a web search or web fetch the
+ * VENDOR ran inside its own response (see `ServerToolDef` in
+ * `llm-providers/types.ts`). Unlike `tool_use`, the result is stored as its
+ * own block rather than in `ChatTurn.toolResults`, because Desde never ran
+ * it: `output` is the vendor's payload, kept verbatim so the next request can
+ * replay it to the same vendor, and `providerMetadata` is the opaque vendor
+ * data that has to travel with it. The panel shows a summary of `output`
+ * (`describeServerToolOutput`), never the payload itself.
+ */
 export type ChatAssistantBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; toolUseId: string; name: string; input: unknown }
+  | {
+      type: 'server_tool_use'
+      /**
+       * The provider id that produced it. Replay drops a server block whose
+       * provider differs from the current turn's, because each vendor
+       * validates the payload against its own schema. Optional only so a
+       * record written without it still loads; such a block is treated as
+       * foreign and dropped.
+       */
+      provider?: string
+      toolUseId: string
+      name: string
+      input: unknown
+      providerMetadata?: Record<string, unknown>
+    }
+  | {
+      type: 'server_tool_result'
+      /** See `server_tool_use.provider`. */
+      provider?: string
+      toolUseId: string
+      name: string
+      output: unknown
+      isError?: boolean
+      providerMetadata?: Record<string, unknown>
+    }
 
 export interface ChatToolResult {
   ok: boolean

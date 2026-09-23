@@ -107,6 +107,29 @@ export type StopReason =
 export interface Usage {
   inputTokens: number
   outputTokens: number
+  /**
+   * Tokens served from the provider's prompt cache. Disjoint from
+   * `inputTokens` — a cache-read token is never also counted as a fresh
+   * input token. Optional: absent on providers/turns that never reported
+   * a figure, not zero. A provider that DID report usage but had no cache
+   * activity this call (e.g. OpenAI, which always includes the field) sets
+   * this to an explicit `0` rather than omitting it — only omit for a
+   * provider/turn that never reports the field at all.
+   */
+  cacheReadInputTokens?: number
+  /**
+   * Tokens written to the provider's prompt cache on this call. Additive
+   * against `inputTokens` the same way `cacheReadInputTokens` is
+   * disjoint. Optional for the same reason.
+   */
+  cacheCreationInputTokens?: number
+  /**
+   * Set when some of this figure is the loop's estimate rather than the
+   * vendor's report: a step cut off by a steer or Stop before its transport
+   * reported usage. See `estimate-cut-off-usage.ts`. Absent means every
+   * token here was reported by the vendor.
+   */
+  estimated?: true
 }
 
 export interface CompleteResult {
@@ -130,17 +153,59 @@ export interface CompleteResult {
 // ─── Streaming + tool-use surface (Phase 1) ─────────────────────────
 
 /**
- * Vendor-neutral tool definition. Schemas are plain JSON Schema —
- * the provider impl translates to native (Anthropic `tools[].input_schema`,
- * OpenAI `functions[].parameters`, etc.).
+ * Vendor-neutral tool definition.
+ *
+ * Two kinds. A FUNCTION tool (the default, `kind` omitted) is one Desde runs
+ * itself: its schema is plain JSON Schema, which the provider impl translates
+ * to native (Anthropic `tools[].input_schema`, OpenAI `functions[].parameters`,
+ * etc.), and the model's call comes back to the loop to be gated and executed.
+ *
+ * A SERVER tool is one the VENDOR runs, inside the same response, with no
+ * round trip through the loop. Only the two web tools exist today. It carries
+ * no schema because the vendor owns it; the provider impl maps `id` to its
+ * own tool factory, and a provider that has no such tool leaves it out of the
+ * request. Which ids a provider can serve is `ProviderCapabilities.webTools`,
+ * and the loop only declares ids listed there.
  */
-export interface ToolDef {
+export type ToolDef = FunctionToolDef | ServerToolDef
+
+export interface FunctionToolDef {
+  kind?: 'function'
   /** Tool name. Must be unique within a call. */
   name: string
   /** One-line description surfaced to the model in the tool registry. */
   description: string
   /** JSON Schema for the tool's input. */
   inputSchema: Record<string, unknown>
+}
+
+/** Every server-side tool id the seam knows. */
+export const SERVER_TOOL_IDS = ['web_search', 'web_fetch'] as const
+
+/** Server-side tool ids a provider may serve. */
+export type ServerToolId = (typeof SERVER_TOOL_IDS)[number]
+
+/**
+ * Cap on server-tool uses per request, sent wherever the vendor accepts one.
+ *
+ * Vendors bill each search or fetch separately from tokens, and those fees are
+ * NOT in the rate cards (`rate-cards.ts` prices tokens only). So the cost
+ * ceiling cannot see them, and this cap is the only bound on them.
+ */
+export const SERVER_TOOL_MAX_USES = 8
+
+export interface ServerToolDef {
+  kind: 'server'
+  id: ServerToolId
+  /**
+   * Domains the vendor may reach. Absent means the vendor's own default,
+   * which for search is "anywhere". `web_fetch` is only ever declared WITH
+   * this list: the web policy's allowlist is the whole reason fetch is safe
+   * to offer.
+   */
+  allowedDomains?: string[]
+  /** Cap on uses within one request, where the vendor supports one. */
+  maxUses?: number
 }
 
 export interface TextContent {
@@ -182,7 +247,7 @@ export interface ToolResultContent {
  * A vision input block on a user message.
  *
  * `data` is base64 WITHOUT the `data:` prefix, matching
- * `ModelImageContent` in `agent-chat-sdk/media-content.ts` — the one place
+ * `ModelImageContent` in `agent-chat/media-content.ts` — the one place
  * an image is validated and byte-capped before it reaches a provider. The
  * field is named `mediaType` rather than `mimeType` because that is the
  * name both wire formats use (`source.media_type`, and the `data:` URL's
@@ -201,8 +266,71 @@ export interface ImageContent {
   data: string
 }
 
-export type AssistantContent = TextContent | ToolUseContent
-export type ChatUserContent = TextContent | ToolResultContent | ImageContent
+/**
+ * A PDF document input block on a user message.
+ *
+ * `data` is base64 WITHOUT the `data:` prefix, matching {@link ImageContent}.
+ * `mediaType` is narrowed to the one type both wire formats accept today
+ * (Anthropic's `document` block, the AI SDK's `file` part) — widen it if a
+ * second document MIME type is ever needed. `name` is an optional display
+ * name for the document (maps to the AI SDK's `filename` and Anthropic's
+ * `title`); omit it and neither field is sent.
+ */
+export interface DocumentContent {
+  type: 'document'
+  /** MIME type; PDF is the only value both wire formats accept today. */
+  mediaType: 'application/pdf'
+  /** Base64 payload, no `data:` prefix. */
+  data: string
+  /** Optional display name for the document. */
+  name?: string
+}
+
+/**
+ * A call to a SERVER tool (see {@link ServerToolDef}) that the vendor made and
+ * ran itself. It sits in the assistant message, never in the loop's pending
+ * calls: there is nothing for Desde to execute.
+ *
+ * `providerMetadata` is opaque vendor data carried from the stream back into
+ * the request on replay, keyed by provider name like `StreamOpts
+ * .providerOptions`. Anthropic records here which code-execution block a web
+ * call came from (`caller`), and replaying the call without it changes what
+ * the vendor is told happened.
+ */
+interface ServerToolUseContent {
+  type: 'server_tool_use'
+  id: string
+  name: string
+  input: unknown
+  providerMetadata?: Record<string, unknown>
+}
+
+/**
+ * The vendor's result for a {@link ServerToolUseContent}. Also in the
+ * assistant message, directly after its call, because the vendor produced
+ * both inside one response.
+ *
+ * `output` is kept exactly as the vendor returned it. It is replayed to the
+ * same vendor on the next request, which validates it against its own
+ * schema, so a summarised or trimmed output would turn the next request into
+ * a 400. `isError` marks a vendor-reported failure (a fetch the vendor could
+ * not complete), which is replayed as an error so the vendor reads it as one.
+ */
+interface ServerToolResultContent {
+  type: 'server_tool_result'
+  toolUseId: string
+  name: string
+  output: unknown
+  isError?: boolean
+  providerMetadata?: Record<string, unknown>
+}
+
+export type AssistantContent =
+  | TextContent
+  | ToolUseContent
+  | ServerToolUseContent
+  | ServerToolResultContent
+export type ChatUserContent = TextContent | ToolResultContent | ImageContent | DocumentContent
 
 /**
  * A turn in the conversation. Roles alternate user → assistant → user
@@ -251,6 +379,10 @@ export interface StreamOpts {
  *   delta events are buffered internally; UIs that want a "tool is
  *   forming…" indicator can use `tool_use_started` / `tool_use_partial`
  *   (added in a later phase if needed).
+ * - `server_tool_use` / `server_tool_result` — a call to a server tool
+ *   (see `ServerToolDef`) and its result, both made by the VENDOR inside
+ *   this response. Announced for display and persistence only. They are
+ *   never pending calls: the loop has nothing to run.
  * - `usage` — token usage so far (may fire mid-stream and at end).
  * - `message_complete` — terminal event; carries the stop reason and
  *   the final assistant message (the full sequence of content blocks
@@ -264,7 +396,21 @@ export type ProviderEvent =
   | { kind: 'text_delta'; delta: string }
   | { kind: 'reasoning_delta'; delta: string }
   | { kind: 'tool_use'; id: string; name: string; input: unknown }
-  | { kind: 'usage'; inputTokens: number; outputTokens: number }
+  | { kind: 'server_tool_use'; id: string; name: string; input: unknown }
+  | {
+      kind: 'server_tool_result'
+      toolUseId: string
+      name: string
+      output: unknown
+      isError?: boolean
+    }
+  | {
+      kind: 'usage'
+      inputTokens: number
+      outputTokens: number
+      cacheReadInputTokens?: number
+      cacheCreationInputTokens?: number
+    }
   | {
       kind: 'message_complete'
       stopReason: StopReason
@@ -333,4 +479,12 @@ export interface LLMProvider {
    * new stream with the results appended as user content.
    */
   streamConversation(opts: StreamOpts): AsyncIterable<ProviderEvent>
+  /**
+   * The server tools THIS provider object can actually declare. Absent means
+   * none. The descriptor's `webTools` says what the vendor offers; this says
+   * what the transport that was built will send, and the two can differ (the
+   * direct Anthropic provider strips server tools). The neutral loop declares
+   * only ids present in both.
+   */
+  readonly serverToolIds?: ReadonlyArray<ServerToolId>
 }

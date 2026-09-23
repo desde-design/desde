@@ -2,7 +2,7 @@
  * Provider-neutral model/effort catalog types for the chat model picker.
  *
  * The catalog is STATIC data (no live /v1/models query — subscription
- * auth via the bundled `claude` binary may have no API key). Each
+ * auth via the `claude` command line tool on PATH may have no API key). Each
  * provider ships one `ProviderModelCatalog`; the CLI serves them at
  * GET /api/editor/chat/model-catalog and the chat handler validates
  * incoming `modelConfig` against them.

@@ -30,18 +30,14 @@ function modelsUrl(baseUrl: string | undefined): string {
 export const OPENAI_DESCRIPTOR: ProviderDescriptor = {
   id: 'openai',
   label: 'OpenAI',
-  chatRuntime: 'neutral',
   capabilities: {
-    // A steer lands at the next tool-loop boundary, not mid-generation. Named
-    // here rather than implied away, because the picker and the steer route
-    // both have to tell the user which one they are getting.
-    midTurnSteering: false,
-    vendorReportedCostUsd: false,
-    inTurnBudgetStop: 'step-boundary',
     reasoningVisibility: true,
-    vendorRateLimitEvents: false,
+    // Raised by the neutral loop from a 429's transport error (see
+    // `streamStepWithRetry` in `run-chat-turn-neutral.ts`), so every
+    // provider gets it, OpenAI included.
+    vendorRateLimitEvents: true,
     imagesInPrompt: true,
-    webTools: false,
+    webTools: ['web_search'],
   },
   credentials: {
     apiKeyEnvVar: 'OPENAI_API_KEY',

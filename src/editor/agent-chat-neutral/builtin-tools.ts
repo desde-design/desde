@@ -6,9 +6,12 @@
  * a prompt that describes a tool the catalog does not register is a promise
  * the runtime cannot keep.
  *
- * There is deliberately no WebFetch and no WebSearch. Neither has an
- * equivalent on this lane, and `describeDisabledCapabilities` tells the model
- * so rather than letting it offer something that cannot happen.
+ * There is deliberately no WebFetch and no WebSearch HERE. On this lane the
+ * web tools are provider server tools, run by the vendor inside its own
+ * response and declared per descriptor (`webTools` in
+ * `provider-descriptor.ts`) when the web policy turns them on. The loop adds
+ * them next to this catalog (`serverToolDefs` in `run-chat-turn-neutral.ts`);
+ * nothing in this file executes a web request.
  */
 
 import type { ToolSpec } from '../agent-chat/tool-spec'

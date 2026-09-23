@@ -14,26 +14,22 @@
  */
 import type { EffortLevel, ProviderModelCatalog } from '../core/model-catalog'
 import type { DefaultAliasRule, LiveModel } from './live-model-catalog'
-import type { LLMProvider } from './types'
-
-/** Which turn runtime serves this provider's chat. */
-export type ChatRuntimeKind = 'claude-agent-sdk' | 'neutral'
+import type { LLMProvider, ServerToolId } from './types'
 
 /** Machine-readable asymmetries, read by the catalog response, the picker and the steer route. */
 export interface ProviderCapabilities {
-  /** true only on the Claude Agent SDK lane; false = steers land at the next tool-loop boundary. */
-  midTurnSteering: boolean
-  /** true when the runtime reports a dollar figure (SDK total_cost_usd); false = rate-card estimate. */
-  vendorReportedCostUsd: boolean
-  /** 'vendor' = the SDK stops in flight; 'step-boundary' = the loop stops between steps. */
-  inTurnBudgetStop: 'vendor' | 'step-boundary'
   /** Whether reasoning_delta events can be expected. */
   reasoningVisibility: boolean
-  /** rate_limit_warning events. Anthropic-only. */
+  /** rate_limit_warning events, raised by the neutral loop off a 429. Every provider gets these, not just Anthropic's own telemetry. */
   vendorRateLimitEvents: boolean
   imagesInPrompt: boolean
-  /** WebFetch / WebSearch built-ins. */
-  webTools: boolean
+  /**
+   * The web tools this provider's VENDOR runs server-side, by id. The neutral
+   * loop declares only ids listed here, and only when the web policy turns
+   * them on; the AI SDK transport's `serverTool` factory is the other end of
+   * the same gate. Empty means the provider has none.
+   */
+  webTools: ReadonlyArray<ServerToolId>
 }
 
 export interface ProviderCredentialSpec {
@@ -47,8 +43,8 @@ export interface ProviderCredentialSpec {
   consoleUrl: string
   /**
    * True only for a provider with a local subscription runtime (Anthropic's
-   * bundled `claude` binary). Gates the dev-mode rungs of the credential
-   * ladder and `isClaudeRuntimeResolvable`. Never generalise this.
+   * `claude` command line tool on PATH). Gates the dev-mode rungs of the
+   * credential ladder and `isClaudeOnPath`. Never generalise this.
    */
   hasSubscriptionRuntime?: boolean
 }
@@ -64,7 +60,6 @@ export interface ProviderDescriptor {
   readonly id: string
   /** 'Anthropic', 'OpenAI'. */
   readonly label: string
-  readonly chatRuntime: ChatRuntimeKind
   readonly capabilities: ProviderCapabilities
   readonly credentials: ProviderCredentialSpec
   /** Build an LLMProvider bound to explicit credentials. No process.env reads. */
@@ -113,7 +108,13 @@ export interface ProviderDescriptor {
      * It reaches the client as `defaultEffort` on each catalog model.
      */
     defaultLevel: EffortLevel | null
-    toRequest(effort: EffortLevel | undefined): Record<string, unknown>
+    /**
+     * `model` is the resolved model id for the turn (falls back to the
+     * descriptor's own default when the caller has none pinned yet). A
+     * vendor whose provider-options shape does not depend on the model
+     * ignores the second argument.
+     */
+    toRequest(effort: EffortLevel | undefined, model?: string): Record<string, unknown>
   }
   /** Patterns merged into classify-turn-error's generic sets, plus the remediation copy. */
   readonly errorPatterns?: ProviderErrorPatterns

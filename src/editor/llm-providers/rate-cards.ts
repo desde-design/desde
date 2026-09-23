@@ -33,12 +33,26 @@
  * below is the shared formula both call sites now use, so they can't
  * drift apart again.
  */
+import type { Usage } from './types'
 
 export interface ModelRateCard {
   /** USD per 1M input tokens. */
   inputPerM: number
   /** USD per 1M output tokens. */
   outputPerM: number
+  /**
+   * USD per 1M cache-read tokens. When omitted, `estimateUsageCost` falls
+   * back to 0.1x `inputPerM` — cache-read ratios are NOT uniform across
+   * Anthropic's own cards (measured on claude.com/pricing 2026-09-22), so
+   * a card with a published rate sets this explicitly rather than relying
+   * on the fallback.
+   */
+  cacheReadPerM?: number
+  /**
+   * USD per 1M cache-creation (cache-write) tokens. When omitted,
+   * `estimateUsageCost` falls back to 1.25x `inputPerM`.
+   */
+  cacheWritePerM?: number
 }
 
 /**
@@ -60,15 +74,20 @@ const RATE_CARDS: Record<string, ModelRateCard> = {
   // Bare catalog ids used by ANTHROPIC_MODEL_CATALOG /
   // ChatSession.modelConfig.model — see anthropic-model-catalog.ts.
   // Published first-party rates as of 2026-06-24 (Anthropic's model table):
-  // Fable 5.1 $10/$50, Opus 5 and 4.8 $5/$25, Sonnet 5 $2/$10, Haiku 4.5
+  // Fable 5.1 $10/$50, Opus 5.5 $4/$20, Opus 5 and 4.8 $5/$25, Sonnet 5 $2/$10, Haiku 4.5
   // $1/$5 per million input/output tokens. The estimates that sat here
   // before were the older Opus tier ($15/$75) applied to every Opus id.
-  'claude-fable-5-1': { inputPerM: 10, outputPerM: 50 },
+  // Cache read/write rates below are explicit per-card, measured on
+  // claude.com/pricing 2026-09-22 — they are NOT a uniform 0.1x/1.25x
+  // multiple of the input rate across cards, so the fallback in
+  // `estimateUsageCost` would misprice them.
+  'claude-fable-5-1': { inputPerM: 10, outputPerM: 50, cacheReadPerM: 0.25, cacheWritePerM: 12.5 },
   'claude-fable-5': { inputPerM: 10, outputPerM: 50 },
   'claude-haiku-4-5': { inputPerM: 1, outputPerM: 5 },
-  'claude-sonnet-5': { inputPerM: 2, outputPerM: 10 },
+  'claude-sonnet-5': { inputPerM: 2, outputPerM: 10, cacheReadPerM: 0.2, cacheWritePerM: 2.5 },
   'claude-opus-4-8': { inputPerM: 5, outputPerM: 25 },
-  'claude-opus-5': { inputPerM: 5, outputPerM: 25 },
+  'claude-opus-5-5': { inputPerM: 4, outputPerM: 20, cacheReadPerM: 0.2, cacheWritePerM: 5 },
+  'claude-opus-5': { inputPerM: 5, outputPerM: 25, cacheReadPerM: 0.5, cacheWritePerM: 6.25 },
   // OpenAI — published rates from developers.openai.com/api/docs/pricing,
   // measured 2026-09-03, USD per 1M input / output tokens. The two rows that
   // sat here before ('gpt-5.2' and 'gpt-5.2-codex' at $5/$15) were guesses and
@@ -103,15 +122,21 @@ export function getRateCard(model: string): ModelRateCard {
 /**
  * Compute the dollar cost of a usage record at this model's rate.
  * Returns a fractional dollar value.
+ *
+ * Cache tokens price at the card's explicit `cacheReadPerM` /
+ * `cacheWritePerM` when set, or fall back to 0.1x / 1.25x of `inputPerM`
+ * — see the fallback note on `ModelRateCard`.
  */
-export function estimateUsageCost(
-  model: string,
-  usage: { inputTokens: number; outputTokens: number },
-): number {
+export function estimateUsageCost(model: string, usage: Usage): number {
   const card = getRateCard(model)
+  const readPerM = card.cacheReadPerM ?? card.inputPerM * 0.1
+  const writePerM = card.cacheWritePerM ?? card.inputPerM * 1.25
   return (
-    (usage.inputTokens * card.inputPerM) / 1_000_000 +
-    (usage.outputTokens * card.outputPerM) / 1_000_000
+    (usage.inputTokens * card.inputPerM +
+      usage.outputTokens * card.outputPerM +
+      (usage.cacheReadInputTokens ?? 0) * readPerM +
+      (usage.cacheCreationInputTokens ?? 0) * writePerM) /
+    1_000_000
   )
 }
 
@@ -123,7 +148,7 @@ export function estimateUsageCost(
  */
 export interface CostableTurn {
   costUsd?: number
-  usage?: { inputTokens: number; outputTokens: number }
+  usage?: Usage
   model?: string
 }
 

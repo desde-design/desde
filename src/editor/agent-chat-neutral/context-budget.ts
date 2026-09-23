@@ -120,8 +120,9 @@ export function applyContextBudget(
   // assistant message: `messages: first message must use the "user" role`.
   // Nothing above enforces that — the drop loop slices on size alone, and the
   // orphan pass can empty a leading user message and remove it, exposing the
-  // assistant message behind it. Anthropic reaches this lane whenever
-  // `chatRuntimeOverride(env) === 'neutral'`, which is how the lane is
+  // assistant message behind it. Anthropic reaches this lane whenever a key
+  // is configured (`resolveChatRuntimeKind` sends it to the sidecar only when
+  // opted into the subscription AND keyless), which is how the lane is
   // exercised today, and the failure would be PERMANENT for that session:
   // every later turn replays the same over-budget history. OpenAI accepts the
   // shape, so this rule is one vendor's and is applied to both.
