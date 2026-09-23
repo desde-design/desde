@@ -16,6 +16,7 @@ import { listAnthropicLiveModels } from '../anthropic-live-models'
 import { resolveAnthropicThinkingConfig } from '../anthropic-adaptive-thinking'
 import type { ProviderDescriptor } from '../provider-descriptor'
 import { claudeReauthMessage } from '../../agent-chat/classify-turn-error'
+import { buildAnthropicProvider } from '../ai-sdk-anthropic'
 
 const VALIDATE_URL = 'https://api.anthropic.com/v1/models?limit=1'
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -41,6 +42,7 @@ export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
     hasSubscriptionRuntime: true,
   },
   buildProvider(input) {
+    if (process.env.EDITOR_ANTHROPIC_TRANSPORT_SPIKE === 'ai-sdk') return buildAnthropicProvider(input)
     return new AnthropicProvider({
       ...(input.apiKey ? { apiKey: input.apiKey } : {}),
       defaultModel: input.model ?? ANTHROPIC_DEFAULT_MODEL,
