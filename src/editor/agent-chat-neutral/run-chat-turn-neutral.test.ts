@@ -1848,6 +1848,152 @@ describe('runChatTurnNeutral: a steer interrupts the step in flight', () => {
  * path. This pins the property that move must not break: the agent's own
  * consecutive writes, with no Read in between, still raise no warning.
  */
+/**
+ * The AI SDK transport's abort shape: the stream is cut before the vendor's
+ * `finish` part, so the provider has no usage figure and reports 0/0. The
+ * vendor still billed the request.
+ */
+function* aiSdkAbortTail(text: string): Generator<ProviderEvent> {
+  yield { kind: 'usage', inputTokens: 0, outputTokens: 0 }
+  yield {
+    kind: 'message_complete',
+    stopReason: 'error',
+    vendorStopReason: 'aborted',
+    message: { role: 'assistant', content: text ? [{ type: 'text', text }] : [] },
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }
+}
+
+describe('runChatTurnNeutral: a cut-off step whose usage the transport never reported', () => {
+  const estimatedFrames = (events: ChatStreamEvent[]) =>
+    events.filter((e) => e.kind === 'usage' && e.estimated === true)
+
+  it('records an estimate for a steer-interrupted first step, flagged as estimated', async () => {
+    const channel = createTurnInputChannel()
+    const { provider, calls } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Hello there' }
+        channel.push('stop, do X')
+        yield* aiSdkAbortTail('Hello there')
+        return
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel, {
+      model: 'gpt-5.6',
+      providerId: 'openai',
+    })
+
+    const frames = estimatedFrames(events)
+    expect(frames).toHaveLength(1)
+    const frame = frames[0] as Extract<ChatStreamEvent, { kind: 'usage' }>
+    // Step 0 has no earlier step to copy, so the input is the request's size
+    // in characters over four.
+    const first = calls[0]
+    const requestChars = JSON.stringify({
+      system: first.system,
+      messages: first.messages,
+      tools: first.tools,
+    }).length
+    expect(frame.inputTokens).toBe(Math.ceil(requestChars / 4))
+    expect(frame.inputTokens).toBeGreaterThan(100)
+    // 'Hello there' is 11 characters.
+    expect(frame.outputTokens).toBe(3)
+    expect(result.turn.usage).toEqual({
+      inputTokens: frame.inputTokens + 10,
+      outputTokens: 5,
+      estimated: true,
+    })
+    // The estimate reaches the cost figure, not only the token count.
+    expect(result.turn.costUsd).toBeGreaterThan(0.001)
+  })
+
+  it("estimates a later step's input from the previous completed step, cache included", async () => {
+    const channel = createTurnInputChannel()
+    const { provider } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        yield { kind: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } }
+        yield {
+          kind: 'message_complete',
+          stopReason: 'tool_use',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'src/App.vue' } }],
+          },
+          usage: { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 4000 },
+        }
+        return
+      }
+      if (i === 1) {
+        yield { kind: 'text_delta', delta: 'Reading' }
+        channel.push('stop, do X')
+        yield* aiSdkAbortTail('Reading')
+        return
+      }
+      yield* textStep('done')
+    })
+    const { events } = await runSteered(provider, channel, { model: 'gpt-5.6', providerId: 'openai' })
+    const frames = estimatedFrames(events)
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ inputTokens: 4500, outputTokens: 2, estimated: true })
+  })
+
+  it('records an estimate for a step the user stopped on the AI SDK transport', async () => {
+    const controller = new AbortController()
+    const { provider } = stepwiseProvider(async function* () {
+      yield { kind: 'text_delta', delta: 'Partial answer' }
+      controller.abort()
+      yield* aiSdkAbortTail('Partial answer')
+    })
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      minimalOpts({
+        signal: controller.signal,
+        model: 'gpt-5.6',
+        providerId: 'openai',
+        emit: (e: ChatStreamEvent) => events.push(e),
+      }) as never,
+      { buildProvider: () => provider },
+    )
+    expect(result.turn.error).toBe('turn aborted')
+    const frames = estimatedFrames(events)
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ outputTokens: 4, estimated: true })
+    expect(result.turn.usage?.estimated).toBe(true)
+    expect(result.turn.usage?.inputTokens).toBeGreaterThan(100)
+  })
+
+  it('does not estimate when the transport reported the usage itself', async () => {
+    const channel = createTurnInputChannel()
+    const { provider } = stepwiseProvider(async function* (_o, i) {
+      if (i === 0) {
+        yield { kind: 'text_delta', delta: 'Hel' }
+        channel.push('stop, do X')
+        yield* adapterAbortTail([], { streamsUsage: false })
+        return
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+    expect(estimatedFrames(events)).toEqual([])
+    expect(result.turn.usage).toEqual({ inputTokens: 13, outputTokens: 3 })
+  })
+
+  it('does not estimate a step that was cut off before anything came back', async () => {
+    const channel = createTurnInputChannel()
+    const { provider } = stepwiseProvider(async function* (o, i) {
+      if (i === 0) {
+        channel.push('stop, do X')
+        await abortedBy(o.signal!)
+      }
+      yield* textStep('done')
+    })
+    const { events, result } = await runSteered(provider, channel)
+    expect(estimatedFrames(events)).toEqual([])
+    expect(result.turn.usage).toEqual({ inputTokens: 10, outputTokens: 2 })
+  })
+})
+
 describe('the read baseline on the neutral lane', () => {
   it('does not warn about the agent overwriting its own write', async () => {
     const { events } = await run([

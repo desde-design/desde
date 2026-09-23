@@ -108,6 +108,7 @@ import { branchModeRootCommitSha } from '../worktree/git-branches'
 
 import { applyContextBudget, capToolResultImageBytes } from './context-budget'
 import { createCostGuard } from './cost-guard'
+import { estimateCutOffStepUsage } from './estimate-cut-off-usage'
 import { replayHistory } from './history-replay'
 import type { McpClientTools } from './mcp-client-tools'
 import {
@@ -565,6 +566,12 @@ async function runInner(
   let outputTokens = 0
   let cacheReadInputTokens = 0
   let cacheCreationInputTokens = 0
+  // Set once any step's usage was estimated rather than reported. Carried
+  // onto `turn.usage` so the persisted figure says so.
+  let usageEstimated = false
+  // Input plus cache tokens of the last step that completed with a reported
+  // figure. A cut-off step's estimate starts from it: same prefix, and more.
+  let lastCompletedStepInput: number | undefined
   let stopReason: 'end_turn' | 'error' = 'end_turn'
   let vendorStopReason: string | undefined
   let errorMessage: string | undefined
@@ -627,6 +634,23 @@ async function runInner(
         ...(extraCacheCreation > 0 ? { cacheCreationInputTokens: extraCacheCreation } : {}),
       })
     }
+  }
+
+  // Records the estimate for a step cut off before its transport reported
+  // any usage. See `estimate-cut-off-usage.ts` for the rule and why it errs
+  // high.
+  const recordEstimatedUsage = (estimate: Usage & { estimated: true }): void => {
+    inputTokens += estimate.inputTokens
+    outputTokens += estimate.outputTokens
+    usageEstimated = true
+    costGuard.record(estimate)
+    opts.emit({
+      kind: 'usage',
+      turnId,
+      inputTokens: estimate.inputTokens,
+      outputTokens: estimate.outputTokens,
+      estimated: true,
+    })
   }
 
   try {
@@ -730,6 +754,12 @@ async function runInner(
       // Every `text_delta` of THIS step, concatenated. It is what an
       // interrupted step keeps: the words already on the user's screen.
       let streamedText = ''
+      // Every `reasoning_delta` of this step. Only its length is used: it is
+      // billed output, and a cut-off step's estimate counts it.
+      let streamedReasoningChars = 0
+      // True once any content frame arrived: proof the request reached the
+      // vendor, which a cut-off step's estimate needs.
+      let sawContent = false
       // Vendor-run calls this step STARTED, and the ones whose result
       // arrived. Their frames go to the client the moment they happen (a
       // search takes seconds, and holding them would hide its progress), so
@@ -784,8 +814,11 @@ async function runInner(
             if (out.kind !== 'usage') releaseToolStarts()
             opts.emit(out)
           }
+          if (ev.kind !== 'usage' && ev.kind !== 'message_complete') sawContent = true
           if (ev.kind === 'text_delta') {
             streamedText += ev.delta
+          } else if (ev.kind === 'reasoning_delta') {
+            streamedReasoningChars += ev.delta.length
           } else if (ev.kind === 'tool_use') {
             pending.push({ id: ev.id, name: ev.name, input: ev.input })
           } else if (ev.kind === 'server_tool_use') {
@@ -821,6 +854,43 @@ async function runInner(
         }
       } finally {
         currentStepAbort = null
+      }
+
+      const streamedTotals = {
+        in: streamedIn,
+        out: streamedOut,
+        cacheRead: streamedCacheRead,
+        cacheCreation: streamedCacheCreation,
+      }
+      // Closes the accounting of a step that was cut off by a steer or Stop.
+      // A transport that never got to report usage (the AI SDK one: its
+      // usage arrives only on the vendor's `finish`, which an abort
+      // prevents) reports zero input. A request that reached the vendor is
+      // billed anyway, so an estimate is recorded instead of nothing.
+      // "Reached the vendor" means a content frame came back, or the
+      // transport completed the message as aborted, which it does only once
+      // its stream was open.
+      const settleCutOffStepUsage = (): void => {
+        const reportedInput =
+          streamedIn +
+          streamedCacheRead +
+          streamedCacheCreation +
+          inputTotalOf(complete?.usage)
+        const reachedVendor = sawContent || complete?.vendorStopReason === 'aborted'
+        if (reportedInput > 0 || !reachedVendor) {
+          settleStepUsage(complete?.usage, streamedTotals)
+          return
+        }
+        recordEstimatedUsage(
+          estimateCutOffStepUsage({
+            request: streamOpts,
+            previousStepInput: lastCompletedStepInput,
+            producedChars:
+              streamedText.length +
+              streamedReasoningChars +
+              pending.reduce((n, call) => n + JSON.stringify(call.input ?? {}).length, 0),
+          }),
+        )
       }
 
       // ── Interrupt ───────────────────────────────────────────────────
@@ -872,13 +942,10 @@ async function runInner(
             error: 'interrupted before the result arrived',
           })
         }
-        // The interrupted request was made, so it is billed and counted.
-        settleStepUsage(complete?.usage, {
-          in: streamedIn,
-          out: streamedOut,
-          cacheRead: streamedCacheRead,
-          cacheCreation: streamedCacheCreation,
-        })
+        // The interrupted request was made, so it is billed and counted:
+        // with the transport's own figure when it reported one, and with an
+        // estimate flagged as such when it did not.
+        settleCutOffStepUsage()
         // The drain at the top of the loop appends the steer, records it and
         // emits `steered`. The step counts against the cap like any other.
         continue
@@ -988,13 +1055,18 @@ async function runInner(
       }
 
       // The step's accounting closes here, after its tool results, so the
-      // transcript shows a step's cost attached to the end of that step.
-      settleStepUsage(finalUsage, {
-        in: streamedIn,
-        out: streamedOut,
-        cacheRead: streamedCacheRead,
-        cacheCreation: streamedCacheCreation,
-      })
+      // transcript shows a step's cost attached to the end of that step. A
+      // step the user stopped is settled like an interrupted one.
+      if (complete?.vendorStopReason === 'aborted') {
+        settleCutOffStepUsage()
+      } else {
+        settleStepUsage(finalUsage, streamedTotals)
+        const stepInput = Math.max(
+          inputTotalOf(finalUsage),
+          streamedIn + streamedCacheRead + streamedCacheCreation,
+        )
+        if (stepInput > 0) lastCompletedStepInput = stepInput
+      }
 
       if (lastStep) break
     }
@@ -1071,6 +1143,7 @@ async function runInner(
             outputTokens,
             ...(cacheReadInputTokens > 0 ? { cacheReadInputTokens } : {}),
             ...(cacheCreationInputTokens > 0 ? { cacheCreationInputTokens } : {}),
+            ...(usageEstimated ? { estimated: true as const } : {}),
           }
         : undefined,
     costUsd: costGuard.turnCostUsd > 0 ? costGuard.turnCostUsd : undefined,
@@ -1086,6 +1159,15 @@ async function runInner(
     ...(Object.keys(conflicts).length > 0 ? { conflicts } : {}),
   }
   return { session, turn }
+}
+
+/** Input plus both cache counters: everything the vendor read for a step. */
+function inputTotalOf(usage: Usage | undefined): number {
+  return (
+    (usage?.inputTokens ?? 0) +
+    (usage?.cacheReadInputTokens ?? 0) +
+    (usage?.cacheCreationInputTokens ?? 0)
+  )
 }
 
 /**

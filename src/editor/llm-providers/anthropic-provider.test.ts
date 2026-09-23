@@ -423,6 +423,48 @@ describe('AnthropicProvider.streamConversation', () => {
     expect(final.message.content).toEqual([])
   })
 
+  it('reports the usage message_start already carried when the stream is aborted', async () => {
+    // The contrast with the AI SDK transport, which has no figure on abort:
+    // this provider reads usage off `message_start`, the first event, so a
+    // step cut off mid-answer still reports what the vendor billed and the
+    // loop needs no estimate for it.
+    const controller = new AbortController()
+    const client = {
+      messages: {
+        create: async () =>
+          (async function* () {
+            yield {
+              type: 'message_start',
+              message: {
+                usage: { input_tokens: 12345, output_tokens: 1, cache_read_input_tokens: 500 },
+              },
+            }
+            yield { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }
+            yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hel' } }
+            if (!controller.signal.aborted) {
+              await new Promise<void>((resolve) =>
+                controller.signal.addEventListener('abort', () => resolve(), { once: true }),
+              )
+            }
+          })(),
+      },
+    }
+    const provider = new AnthropicProvider({ client: client as unknown as Anthropic })
+    let final: ProviderEvent | undefined
+    for await (const ev of provider.streamConversation({
+      system: 's',
+      messages: [{ role: 'user', content: 'q' }],
+      tools: [],
+      signal: controller.signal,
+    })) {
+      if (ev.kind === 'text_delta') controller.abort()
+      if (ev.kind === 'message_complete') final = ev
+    }
+    if (final?.kind !== 'message_complete') throw new Error('expected message_complete')
+    expect(final.vendorStopReason).toBe('aborted')
+    expect(final.usage).toMatchObject({ inputTokens: 12345, cacheReadInputTokens: 500 })
+  })
+
   it('marks malformed tool input JSON with __parseError instead of crashing', async () => {
     const events = [
       { type: 'message_start', message: { usage: { input_tokens: 0, output_tokens: 0 } } },

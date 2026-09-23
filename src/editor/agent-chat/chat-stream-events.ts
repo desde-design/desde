@@ -323,6 +323,12 @@ export type ChatStreamEvent =
        * turns.
        */
       cacheReadInputTokens?: number
+      /**
+       * Set when this frame is the neutral loop's estimate for a step cut
+       * off before its transport reported usage, not the vendor's figure.
+       * See `estimate-cut-off-usage.ts`.
+       */
+      estimated?: true
     }
   | {
       kind: 'turn_complete'

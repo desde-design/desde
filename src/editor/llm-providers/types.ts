@@ -123,6 +123,13 @@ export interface Usage {
    * disjoint. Optional for the same reason.
    */
   cacheCreationInputTokens?: number
+  /**
+   * Set when some of this figure is the loop's estimate rather than the
+   * vendor's report: a step cut off by a steer or Stop before its transport
+   * reported usage. See `estimate-cut-off-usage.ts`. Absent means every
+   * token here was reported by the vendor.
+   */
+  estimated?: true
 }
 
 export interface CompleteResult {

@@ -433,6 +433,11 @@ export class AiSdkProvider implements LLMProvider {
 
     if (opts.signal?.aborted) aborted = true
 
+    // On an abort this is 0/0. The vendor reports usage only on its `finish`
+    // part, and an abort ends the stream before that part arrives, so there
+    // is no figure to read here. The vendor still billed the request: the
+    // neutral loop sees the zero and records an estimate in its place
+    // (`estimate-cut-off-usage.ts`).
     yield { kind: 'usage', ...usage }
 
     // A finished response that said nothing is a failed step, not an empty

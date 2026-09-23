@@ -727,6 +727,15 @@ describe('AiSdkProvider.streamConversation', () => {
     // is kept, not discarded, so the transcript shows what the model had
     // said when the user pressed Stop.
     expect(done.message.content).toEqual([{ type: 'text', text: 'partial' }])
+    // No `finish` part arrived, so the vendor never reported usage and the
+    // provider has only zeros to give. The neutral loop reads that zero as
+    // "not reported" and records an estimate (`estimate-cut-off-usage.ts`).
+    expect(events.find((e) => e.kind === 'usage')).toEqual({
+      kind: 'usage',
+      inputTokens: 0,
+      outputTokens: 0,
+    })
+    expect(done.usage).toEqual({ inputTokens: 0, outputTokens: 0 })
   })
 
   it('falls back to the post-loop signal check when the stream ends with no abort part', async () => {
