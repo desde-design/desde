@@ -962,42 +962,33 @@ export async function handleChatRequest(
     const { computeEnabledCapabilityIds, describeDisabledCapabilities } = await import(
       "../../../src/editor/core/capability-catalog.js"
     )
-    // The LANE is half the answer, not a refinement of it. `.mcp.json` says a
-    // server is declared; only the runtime says whether anything registers it.
-    // Both lanes now register MCP servers (the neutral lane through its own
-    // stdio client), but web search on the neutral lane still depends on the
-    // provider, below, and reporting a capability as ON that the model cannot
-    // call is the failure this guards against.
-    // `capability-catalog.ts` still spells the sidecar lane
-    // `claude-agent-sdk` (Task 27 is the field/vocabulary cleanup) —
-    // `resolveChatRuntimeKind` spells it `sidecar`. Map here rather than
-    // touch that module's own `CapabilityRuntimeId` vocabulary in this task.
-    const capabilityRuntime: import("../../../src/editor/core/capability-catalog.js").CapabilityRuntimeId =
-      resolveChatRuntimeKind(turnProviderId, process.env) === "sidecar"
-        ? "claude-agent-sdk"
-        : "neutral"
+    // `.mcp.json` says a server is declared; whether anything registers it is
+    // a separate question, which is what `serverToolIds` below answers for
+    // web search — the only capability whose availability still depends on
+    // which runtime and provider the turn dispatches to. Reporting a
+    // capability as ON that the model cannot actually call is the failure
+    // this guards against.
+    //
     // On the neutral lane web search is a PROVIDER server tool, so whether it
     // is served depends on the provider too. The provider object is not built
     // yet at this point (the runtime builds it), so the descriptor's
     // `webTools` is the honest upper bound available here. The runtime then
     // narrows it again to what the built provider actually sends
     // (`serverToolDefs` in `run-chat-turn-neutral.ts`), so a provider that
-    // strips server tools still declares none. On the SDK lane web search is
-    // the SDK's own built-in and this list does not apply.
+    // strips server tools still declares none. On the sidecar lane web search
+    // is the SDK's own built-in and this list does not apply.
     const capabilityServerToolIds =
-      capabilityRuntime === "neutral"
+      resolveChatRuntimeKind(turnProviderId, process.env) === "neutral"
         ? (getDescriptor(turnProviderId)?.capabilities.webTools ?? [])
         : undefined
     const enabledCapabilityIds = computeEnabledCapabilityIds({
       enabledExtensionIds: (extensions ?? []).map((e) => e.id),
       webFetchAllowedHosts: webPolicy?.webFetchAllowedHosts ?? [],
       webSearchEnabled: webPolicy?.webSearchEnabled ?? false,
-      chatRuntime: capabilityRuntime,
       ...(capabilityServerToolIds ? { serverToolIds: capabilityServerToolIds } : {}),
     })
     const disabledCapabilities = describeDisabledCapabilities(
       enabledCapabilityIds,
-      capabilityRuntime,
       capabilityServerToolIds,
     )
 
@@ -1012,12 +1003,7 @@ export async function handleChatRequest(
       )
       // Detect against LIVE ids first — the overwhelmingly common case is no
       // gap at all, and that path must add no I/O to a turn.
-      const candidates = detectCapabilityGaps(
-        body.userMessage,
-        enabledCapabilityIds,
-        undefined,
-        capabilityRuntime,
-      )
+      const candidates = detectCapabilityGaps(body.userMessage, enabledCapabilityIds)
       // Only now consult what is DECLARED. An entry whose ${VAR} is unset is
       // written to .mcp.json but skipped by the loader, so offering to enable
       // it would post to a route that answers 409. (The prompt block above

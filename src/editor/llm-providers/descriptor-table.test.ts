@@ -13,9 +13,6 @@ import { getRateCard, UNKNOWN_MODEL_RATE } from './rate-cards'
 import { EFFORT_LEVELS } from '../core/model-catalog'
 
 const CAPABILITY_KEYS = [
-  'midTurnSteering',
-  'vendorReportedCostUsd',
-  'inTurnBudgetStop',
   'reasoningVisibility',
   'vendorRateLimitEvents',
   'imagesInPrompt',
@@ -36,11 +33,11 @@ describe('the descriptor table', () => {
 
   for (const d of listDescriptors()) {
     describe(d.id, () => {
-      it('has a label, a chat runtime and a full capabilities record', () => {
+      it('has a label and a full capabilities record, with no chat-runtime field', () => {
         expect(d.label.trim().length).toBeGreaterThan(0)
-        expect(['claude-agent-sdk', 'neutral']).toContain(d.chatRuntime)
+        expect(d).not.toHaveProperty('chatRuntime')
         for (const k of CAPABILITY_KEYS) expect(d.capabilities).toHaveProperty(k)
-        expect(['vendor', 'step-boundary']).toContain(d.capabilities.inTurnBudgetStop)
+        expect(Array.isArray(d.capabilities.webTools)).toBe(true)
       })
 
       it('has a usable credential spec', () => {

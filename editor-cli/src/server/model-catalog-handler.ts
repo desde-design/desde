@@ -56,9 +56,6 @@ import {
  * flag is off.
  */
 const FALLBACK_CAPABILITIES: ProviderCapabilities = {
-  midTurnSteering: false,
-  vendorReportedCostUsd: false,
-  inTurnBudgetStop: "step-boundary",
   reasoningVisibility: false,
   vendorRateLimitEvents: false,
   imagesInPrompt: false,

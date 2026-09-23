@@ -3,10 +3,9 @@ import { ANTHROPIC_DESCRIPTOR } from './anthropic'
 import { ANTHROPIC_MODEL_CATALOG } from '../anthropic-model-catalog'
 
 describe('ANTHROPIC_DESCRIPTOR', () => {
-  it('keeps today\'s identity, runtime and credential facts', () => {
+  it('keeps today\'s identity and credential facts', () => {
     expect(ANTHROPIC_DESCRIPTOR.id).toBe('anthropic')
     expect(ANTHROPIC_DESCRIPTOR.label).toBe('Anthropic')
-    expect(ANTHROPIC_DESCRIPTOR.chatRuntime).toBe('claude-agent-sdk')
     expect(ANTHROPIC_DESCRIPTOR.credentials.apiKeyEnvVar).toBe('ANTHROPIC_API_KEY')
     expect(ANTHROPIC_DESCRIPTOR.credentials.maskPrefix).toBe('sk-ant-')
     expect(ANTHROPIC_DESCRIPTOR.credentials.hasSubscriptionRuntime).toBe(true)
@@ -17,11 +16,8 @@ describe('ANTHROPIC_DESCRIPTOR', () => {
     expect(ANTHROPIC_DESCRIPTOR.staticCatalog).toBe(ANTHROPIC_MODEL_CATALOG)
   })
 
-  it('reports the capability asymmetries the SDK lane actually has', () => {
+  it('reports its capability asymmetries', () => {
     expect(ANTHROPIC_DESCRIPTOR.capabilities).toEqual({
-      midTurnSteering: true,
-      vendorReportedCostUsd: true,
-      inTurnBudgetStop: 'vendor',
       reasoningVisibility: true,
       vendorRateLimitEvents: true,
       imagesInPrompt: true,

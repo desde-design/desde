@@ -16,20 +16,11 @@ import type { EffortLevel, ProviderModelCatalog } from '../core/model-catalog'
 import type { DefaultAliasRule, LiveModel } from './live-model-catalog'
 import type { LLMProvider, ServerToolId } from './types'
 
-/** Which turn runtime serves this provider's chat. */
-export type ChatRuntimeKind = 'claude-agent-sdk' | 'neutral'
-
 /** Machine-readable asymmetries, read by the catalog response, the picker and the steer route. */
 export interface ProviderCapabilities {
-  /** true only on the Claude Agent SDK lane; false = steers land at the next tool-loop boundary. */
-  midTurnSteering: boolean
-  /** true when the runtime reports a dollar figure (SDK total_cost_usd); false = rate-card estimate. */
-  vendorReportedCostUsd: boolean
-  /** 'vendor' = the SDK stops in flight; 'step-boundary' = the loop stops between steps. */
-  inTurnBudgetStop: 'vendor' | 'step-boundary'
   /** Whether reasoning_delta events can be expected. */
   reasoningVisibility: boolean
-  /** rate_limit_warning events. Anthropic-only. */
+  /** rate_limit_warning events, raised by the neutral loop off a 429. Every provider gets these, not just Anthropic's own telemetry. */
   vendorRateLimitEvents: boolean
   imagesInPrompt: boolean
   /**
@@ -69,7 +60,6 @@ export interface ProviderDescriptor {
   readonly id: string
   /** 'Anthropic', 'OpenAI'. */
   readonly label: string
-  readonly chatRuntime: ChatRuntimeKind
   readonly capabilities: ProviderCapabilities
   readonly credentials: ProviderCredentialSpec
   /** Build an LLMProvider bound to explicit credentials. No process.env reads. */

@@ -2,10 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { OPENAI_DESCRIPTOR } from './openai'
 
 describe('OPENAI_DESCRIPTOR', () => {
-  it('declares the neutral chat runtime and no subscription runtime', () => {
+  it('declares no subscription runtime', () => {
     expect(OPENAI_DESCRIPTOR.id).toBe('openai')
     expect(OPENAI_DESCRIPTOR.label).toBe('OpenAI')
-    expect(OPENAI_DESCRIPTOR.chatRuntime).toBe('neutral')
     expect(OPENAI_DESCRIPTOR.credentials.hasSubscriptionRuntime).toBeUndefined()
   })
 
@@ -15,13 +14,11 @@ describe('OPENAI_DESCRIPTOR', () => {
     expect(OPENAI_DESCRIPTOR.credentials.maskPrefix).toBe('sk-')
   })
 
-  it('reports the asymmetries the neutral lane will have', () => {
-    expect(OPENAI_DESCRIPTOR.capabilities.midTurnSteering).toBe(false)
+  it('reports its capability asymmetries', () => {
     // The neutral loop raises `rate_limit_warning` itself off a 429's
-    // transport error, so this is true for every provider on that lane now
-    // — see `streamStepWithRetry` in `run-chat-turn-neutral.ts`.
+    // transport error, so this is true for every provider now — see
+    // `streamStepWithRetry` in `run-chat-turn-neutral.ts`.
     expect(OPENAI_DESCRIPTOR.capabilities.vendorRateLimitEvents).toBe(true)
-    expect(OPENAI_DESCRIPTOR.capabilities.inTurnBudgetStop).toBe('step-boundary')
     expect(OPENAI_DESCRIPTOR.capabilities.webTools).toEqual(['web_search'])
   })
 

@@ -5,7 +5,6 @@ import {
   describeDisabledCapabilities,
   detectCapabilityGaps,
   findCapability,
-  runtimeSupportsCapability,
 } from './capability-catalog'
 
 const NONE = { enabledExtensionIds: [], webFetchAllowedHosts: [], webSearchEnabled: false }
@@ -66,66 +65,37 @@ describe('computeEnabledCapabilityIds', () => {
     expect([...on]).toEqual([])
   })
 
-  it('reports Figma as on for the neutral lane, which connects MCP servers itself', () => {
-    // The neutral lane spawns `.mcp.json` servers through its own stdio
-    // client (`agent-chat-neutral/mcp-client-tools.ts`), under the same
-    // `mcp__figma__*` names the SDK lane registers.
+  it('reports Figma as on, since the runtime connects MCP servers through its own stdio client', () => {
+    // `agent-chat-neutral/mcp-client-tools.ts` spawns `.mcp.json` servers
+    // itself, under the same `mcp__figma__*` names.
     const on = computeEnabledCapabilityIds({
       ...NONE,
       enabledExtensionIds: ['figma'],
-      chatRuntime: 'neutral',
     })
     expect(on.has('figma')).toBe(true)
   })
 
-  it('reports web search OFF on the neutral lane when the provider serves no server tools', () => {
+  it('reports web search OFF when the provider serves no server tools', () => {
     const on = computeEnabledCapabilityIds({
       ...NONE,
       webSearchEnabled: true,
-      chatRuntime: 'neutral',
       serverToolIds: [],
     })
     expect(on.has('web-search')).toBe(false)
     const withSearch = computeEnabledCapabilityIds({
       ...NONE,
       webSearchEnabled: true,
-      chatRuntime: 'neutral',
       serverToolIds: ['web_search'],
     })
     expect(withSearch.has('web-search')).toBe(true)
   })
 
-  it('reports web search as on for the neutral lane, which declares it as a provider server tool', () => {
+  it('reports web search as on when no serverToolIds are given', () => {
     const on = computeEnabledCapabilityIds({
       ...NONE,
       webSearchEnabled: true,
-      chatRuntime: 'neutral',
     })
     expect(on.has('web-search')).toBe(true)
-  })
-
-  it('is unchanged on the SDK lane, which does register them', () => {
-    const on = computeEnabledCapabilityIds({
-      ...NONE,
-      enabledExtensionIds: ['figma'],
-      chatRuntime: 'claude-agent-sdk',
-    })
-    expect(on.has('figma')).toBe(true)
-  })
-})
-
-describe('runtimeSupportsCapability', () => {
-  it('serves every entry on both lanes', () => {
-    for (const c of CAPABILITY_CATALOG) {
-      expect(runtimeSupportsCapability(c, 'claude-agent-sdk'), c.id).toBe(true)
-      expect(runtimeSupportsCapability(c, 'neutral'), c.id).toBe(true)
-    }
-  })
-
-  it('makes every entry state its runtimes rather than defaulting', () => {
-    for (const c of CAPABILITY_CATALOG) {
-      expect(c.runtimes.length, `${c.id} must name its runtimes`).toBeGreaterThan(0)
-    }
   })
 })
 
@@ -194,8 +164,8 @@ describe('describeDisabledCapabilities', () => {
     expect(block).not.toContain('**Figma**')
   })
 
-  it('lists Figma and web search on the neutral lane under available-but-OFF, with no cannot-be-used section', () => {
-    const block = describeDisabledCapabilities(new Set(), 'neutral')!
+  it('lists Figma and web search under available-but-OFF, with no cannot-be-used section', () => {
+    const block = describeDisabledCapabilities(new Set())!
     expect(block).toContain('**Figma**')
     expect(block).toContain('**Web search**')
     expect(block).toContain('Extensions panel')
@@ -203,7 +173,7 @@ describe('describeDisabledCapabilities', () => {
   })
 
   it('moves web search under cannot-be-used when the provider serves no server tools, leaving Figma enableable', () => {
-    const block = describeDisabledCapabilities(new Set(), 'neutral', [])!
+    const block = describeDisabledCapabilities(new Set(), [])!
     const [enableable, unavailable] = block.split(/cannot be used with the model/i)
     expect(enableable).not.toContain('**Web search**')
     expect(enableable).toContain('**Figma**')
@@ -212,15 +182,10 @@ describe('describeDisabledCapabilities', () => {
   })
 
   it('names no vendor in the unavailable remedy', () => {
-    const block = describeDisabledCapabilities(new Set(), 'neutral', [])!
+    const block = describeDisabledCapabilities(new Set(), [])!
     expect(block).not.toMatch(/Claude/)
     // The prompt wraps at ~76 columns, so the phrase is read with line breaks folded.
     expect(block.replace(/\s+/g, ' ')).toContain('a model from a provider that offers them')
-  })
-
-  it('keeps the panel wording on the SDK lane', () => {
-    const block = describeDisabledCapabilities(new Set(), 'claude-agent-sdk')!
-    expect(block).toContain('Extensions panel')
   })
 })
 
@@ -264,4 +229,3 @@ describe('legacy figma config counts as enabled', () => {
     }
   })
 })
-

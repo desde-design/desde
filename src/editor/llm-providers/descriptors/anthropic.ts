@@ -1,8 +1,10 @@
 /**
- * Anthropic. The descriptor records what the product does today, unchanged:
- * the Claude Agent SDK serves its chat, the `claude` command line tool on
- * PATH gives it the only subscription runtime any provider has, and its key validates against
- * `/v1/models`.
+ * Anthropic. Chat runs on the neutral loop, same as every other provider —
+ * the transport is `buildProvider` below (the AI SDK path it can opt into is
+ * spike-gated, see `EDITOR_ANTHROPIC_TRANSPORT_SPIKE`). The `claude` command
+ * line tool on PATH gives it the only subscription runtime any provider has,
+ * a dev-only sidecar lane reached separately (`resolveChatRuntimeKind`), and
+ * its key validates against `/v1/models`.
  *
  * `hasSubscriptionRuntime` is the one flag that must never be copied onto
  * another vendor. It is what makes the credential ladder's dev-mode rungs and
@@ -25,11 +27,7 @@ const VALIDATE_TIMEOUT_MS = 10_000
 export const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = {
   id: 'anthropic',
   label: 'Anthropic',
-  chatRuntime: 'claude-agent-sdk',
   capabilities: {
-    midTurnSteering: true,
-    vendorReportedCostUsd: true,
-    inTurnBudgetStop: 'vendor',
     reasoningVisibility: true,
     vendorRateLimitEvents: true,
     imagesInPrompt: true,
