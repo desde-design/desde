@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react"
-import { mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -25,27 +25,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
  * one test.
  *
  * ---------------------------------------------------------------------------
- * TWO TABLES. The split is the point, so read the names.
+ * FOUR TABLES, one pattern repeated twice. Read the names.
  * ---------------------------------------------------------------------------
  *
- * `EQUAL_CASES` — "steering must not break this". Live must EQUAL hydrated.
- *   Rows whose name starts with `control:` carry NO steer at all. They are the
- *   baseline. Without them this file cannot tell "steering broke ordering"
- *   apart from "ordering was already like this" — it would credit steering for
- *   a defect it did not cause, or blame it for one it did not introduce. A red
- *   control row means the defect is NOT in steering, because no steering
- *   happened in it.
+ * The SDK lane gets Tables 1-2, the neutral lane gets Tables 3-4, and each
+ * lane's pair follows the SAME split:
  *
- * `KNOWN_DIVERGENCES` — "this is how it already was". Live and hydrated
- *   disagree. Each row asserts the CURRENT shape of BOTH lists rather than an
- *   equality that would fail today, so it is a tripwire: if the behaviour
- *   moves, the row goes red and somebody has to look. Each row carries a
- *   `why` — what diverges, and why it is tolerated. A red row here is not
- *   automatically a bug. Investigate, then either fix it and move the row into
- *   `EQUAL_CASES`, or update the row and write down what changed.
+ * `EQUAL_CASES` (Tables 1 and 3) — "steering must not break this". Live must
+ *   EQUAL hydrated. Rows whose name starts with `control:` carry NO steer at
+ *   all. They are the baseline. Without them this file cannot tell "steering
+ *   broke ordering" apart from "ordering was already like this" — it would
+ *   credit steering for a defect it did not cause, or blame it for one it did
+ *   not introduce. A red control row means the defect is NOT in steering,
+ *   because no steering happened in it.
  *
- * Nothing may move from `EQUAL_CASES` into `KNOWN_DIVERGENCES`. That direction
- * is a regression being written down as if it were history.
+ * `KNOWN_DIVERGENCES` (Tables 2 and 4) — "this is how it already was". Live
+ *   and hydrated disagree. Each row asserts the CURRENT shape of BOTH lists
+ *   rather than an equality that would fail today, so it is a tripwire: if
+ *   the behaviour moves, the row goes red and somebody has to look. Each row
+ *   carries a `why` — what diverges, and why it is tolerated. A red row here
+ *   is not automatically a bug. Investigate, then either fix it and move the
+ *   row into the matching `EQUAL_CASES` table, or update the row and write
+ *   down what changed.
+ *
+ * Nothing may move from an `EQUAL_CASES` table into its `KNOWN_DIVERGENCES`
+ * table. That direction is a regression being written down as if it were
+ * history.
  *
  * ---------------------------------------------------------------------------
  * "Pre-existing" here is MEASURED, not assumed.
@@ -371,12 +376,18 @@ interface NeutralCall {
  * mid-text" row is one script message but becomes two provider calls: the
  * split IS the point being tested.
  *
- * A top-level `{ step: "steer" }` (between messages) is the boundary case,
- * unchanged from before: pushed into the channel right away, at compile time,
- * and drained by the RUNTIME itself at the next step boundary rather than
- * interrupting anything. See the comment inline below for why faking a
- * `steered` event for it here would hide the exact divergence this file
- * exists to catch.
+ * A top-level `{ step: "steer" }` (between messages) is a DIFFERENT thing
+ * from an inline one, and this compiler runs entirely before the turn runtime
+ * is even called: `buildNeutralCalls` executes inside `buildProvider()`,
+ * which `runChatTurnNeutral` calls BEFORE `channel.begin`. So a top-level
+ * steer is always pushed before the turn begins, whatever its position in the
+ * script — a "steer at a tool boundary" row and a "steer before any output"
+ * row push at the exact same moment, and only the channel's own queue order
+ * (and the runtime's step-boundary drain, later) decides where each is
+ * delivered. It is never an interrupt: nothing is streaming yet to abort. A
+ * script that wants a steer to land WHILE a real tool call is running has to
+ * drive that from outside this DSL — see the dedicated test below that wraps
+ * the permission gate instead.
  */
 function buildNeutralCalls(
   script: ScriptStep[],
@@ -404,6 +415,17 @@ function buildNeutralCalls(
         current = []
         interrupted = true
         continue
+      }
+      if (interrupted && part.part === "tool") {
+        // A tool part scripted AFTER an inline steer, in the same message,
+        // has nowhere to go: the steer already closed a call, so this part
+        // would silently join the NEXT call's `current` with no boundary of
+        // its own, and the loop would never see it as a tool_use that needs
+        // running. No row needs this shape today — fail loudly rather than
+        // compile it into something that quietly isn't what the script says.
+        throw new Error(
+          'buildNeutralCalls: a "tool" part after an inline "steer" in the same message is not supported — split it into a separate message step instead.',
+        )
       }
       current.push(part)
     }
@@ -673,6 +695,17 @@ interface RunResult {
   hydrated: MessageShape[]
   liveEmpties: ChatMessage[]
   hydratedEmpties: ChatMessage[]
+  /**
+   * Every event the server run emitted, unfiltered (including
+   * `resubmit_required`, which the replay above drops). A shape pin cannot
+   * see `resubmit_required` in `live`/`hydrated` at all — that frame starts a
+   * NEW turn this file does not replay — so a row that wants to prove an
+   * interrupt did NOT quietly turn into one reads `events` directly instead.
+   */
+  events: ChatStreamEvent[]
+  /** The full persisted turn, for assertions the shape comparison can't make
+   * (e.g. a specific tool's recorded `ok`/`error`). */
+  turn: ChatTurn
 }
 
 async function runScript(
@@ -744,7 +777,7 @@ async function runScript(
   const hydrated = shapeOf(result.current.messages)
   const hydratedEmpties = emptyAssistants(result.current.messages)
 
-  return { turnId: turn.id, live, hydrated, liveEmpties, hydratedEmpties }
+  return { turnId: turn.id, live, hydrated, liveEmpties, hydratedEmpties, events, turn }
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,7 +1115,26 @@ describe("known divergences: live and hydrated already disagree", () => {
 // Table 3 — the neutral lane, over the same invariant
 // ---------------------------------------------------------------------------
 
-const NEUTRAL_EQUAL_CASES: Array<{ name: string; script: ScriptStep[] }> = [
+interface NeutralEqualCase {
+  name: string
+  script: ScriptStep[]
+  /**
+   * A shape pin, checked ON TOP OF the live===hydrated equality every row
+   * gets. The equality alone cannot tell "steering worked" from "steering
+   * quietly turned into a failed turn": a regression that converts an
+   * interrupt into `resubmit_required` (filtered out of replay, so neither
+   * list ever mentions the steer) or that runs a tool call the loop should
+   * have dropped would still produce two lists that agree with each other —
+   * just agree on the WRONG thing. A pin fixes what "right" means for a row
+   * that carries a steer, instead of only ever checking self-consistency.
+   */
+  pin?: (turnId: string) => MessageShape[]
+  /** Assertions a shape comparison can't make — e.g. that no event exists at
+   * all for a tool call the interrupt was supposed to drop. */
+  extra?: (run: RunResult) => void
+}
+
+const NEUTRAL_EQUAL_CASES: NeutralEqualCase[] = [
   {
     // A vendor-run web call persists as TWO blocks (call, result) but renders
     // as ONE tool disclosure. Hydration must merge them the way the live
@@ -1181,6 +1233,12 @@ const NEUTRAL_EQUAL_CASES: Array<{ name: string; script: ScriptStep[] }> = [
       },
       { step: "message", id: "m2", parts: [{ part: "delta", text: "ing the padding now." }] },
     ],
+    pin: (turnId) => [
+      user("first"),
+      assistant(turnId, "text:Chang"),
+      user("make it 12px"),
+      assistant(`${turnId}:cont-1`, "text:ing the padding now."),
+    ],
   },
   {
     name: "steer before any block (interrupted before anything streamed)",
@@ -1188,6 +1246,7 @@ const NEUTRAL_EQUAL_CASES: Array<{ name: string; script: ScriptStep[] }> = [
       { step: "message", id: "m1", parts: [{ part: "steer", text: "actually use the sidebar" }] },
       { step: "message", id: "m2", parts: [{ part: "delta", text: "on it" }] },
     ],
+    pin: (turnId) => [user("first"), user("actually use the sidebar"), assistant(turnId, "text:on it")],
   },
   {
     name: "steer after a complete tool_use was streamed: the call is dropped, never run",
@@ -1203,15 +1262,35 @@ const NEUTRAL_EQUAL_CASES: Array<{ name: string; script: ScriptStep[] }> = [
       },
       { step: "message", id: "m2", parts: [{ part: "delta", text: "done" }] },
     ],
+    pin: (turnId) => [
+      user("first"),
+      assistant(turnId, "text:writing it now"),
+      user("stop, do X"),
+      assistant(`${turnId}:cont-1`, "text:done"),
+    ],
+    extra: (run) => {
+      // The dropped call never shows up as a block on either side...
+      for (const list of [run.live, run.hydrated]) {
+        for (const m of list) {
+          if (!("blocks" in m)) continue
+          expect(m.blocks.some((b: string) => b.startsWith("tool:tu_1"))).toBe(false)
+        }
+      }
+      // ...and it was never run: no tool_result event exists for it at all,
+      // not even a failed one.
+      expect(run.events.filter((e) => e.kind === "tool_result" && e.toolUseId === "tu_1")).toEqual([])
+    },
   },
 ]
 
 describe("neutral lane: live stream === re-hydrated transcript", () => {
-  it.each(NEUTRAL_EQUAL_CASES)("$name", async ({ script }) => {
+  it.each(NEUTRAL_EQUAL_CASES)("$name", async ({ script, pin, extra }) => {
     const run = await runScript(script, root, runNeutralServer)
     expect(run.liveEmpties).toEqual([])
     expect(run.hydratedEmpties).toEqual([])
     expect(run.hydrated).toEqual(run.live)
+    if (pin) expect(run.live).toEqual(pin(run.turnId))
+    extra?.(run)
   })
 })
 
@@ -1233,12 +1312,7 @@ const NEUTRAL_KNOWN_DIVERGENCES: DivergenceCase[] = [
       "arrived'), but persists NO server blocks from the interrupted step at " +
       "all — a partial vendor response is not safe to replay back to the " +
       "vendor on the next turn. So live shows the search as a failed row; a " +
-      "reload of the SAME turn shows no row for it whatsoever. Tolerated " +
-      "because the information that failed is exactly the search: there is no " +
-      "result to persist, and inventing one would be dishonest about what the " +
-      "vendor was asked. Closing it would mean persisting a placeholder " +
-      "'cancelled' block, which is a product decision about what a session " +
-      "file stores, not an ordering fix.",
+      "reload of the SAME turn shows no row for it whatsoever.",
     script: [
       {
         step: "message",
@@ -1279,5 +1353,152 @@ describe("neutral lane: known divergences", () => {
 
     expect(run.liveEmpties).toEqual([])
     expect(run.hydratedEmpties).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A REAL mid-tool steer.
+//
+// `buildNeutralCalls` (above) cannot express this: a top-level `{ step:
+// "steer" }` is pushed while COMPILING the script, before the turn runtime
+// is even reached, so it can only ever land where a boundary drain finds it
+// — never literally while a Desde-run tool is executing. Proving that
+// interleaving for real needs a REAL tool call and a hook into the moment
+// the runtime is about to run it, so this one test drives
+// `runChatTurnNeutral` directly instead of going through the script table:
+// a genuine `Read` of a file that exists, and `deps.wrapGate` (the same
+// test-only seam `run-chat-turn-neutral.test.ts`'s "does not write when Stop
+// lands while the permission gate is still deciding" test uses) to push the
+// steer from inside the permission decision that runs immediately before
+// the tool handler.
+// ---------------------------------------------------------------------------
+
+describe("neutral lane: a steer while a Desde tool is genuinely running", () => {
+  it("keeps the tool's result, delivers the steer at the next boundary, and live matches hydrated", async () => {
+    writeFileSync(join(root, "note.txt"), "hello", "utf8")
+
+    const channel = createTurnInputChannel()
+    let calls = 0
+    const provider: LLMProvider = {
+      name: "scripted",
+      defaultModel: "x",
+      complete: async () => ({ text: "", stopReason: "end_turn" }),
+      streamConversation: () => {
+        const step = calls++
+        return (async function* (): AsyncGenerator<ProviderEvent> {
+          if (step === 0) {
+            yield { kind: "tool_use", id: "tu_1", name: "Read", input: { file_path: "note.txt" } }
+            yield {
+              kind: "message_complete",
+              stopReason: "tool_use",
+              message: {
+                role: "assistant",
+                content: [{ type: "tool_use", id: "tu_1", name: "Read", input: { file_path: "note.txt" } }],
+              },
+            }
+            return
+          }
+          yield { kind: "text_delta", delta: "done" }
+          yield {
+            kind: "message_complete",
+            stopReason: "end_turn",
+            message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+          }
+        })()
+      },
+    }
+
+    const events: ChatStreamEvent[] = []
+    const result = await runChatTurnNeutral(
+      {
+        bridge: { send: vi.fn(async () => null) } satisfies BridgeClient,
+        worktreeRoot: root,
+        session: makeEmptySession("proj-1"),
+        userMessage: "first",
+        providerId: "anthropic",
+        inputChannel: channel,
+        emit: (e: ChatStreamEvent) => events.push(e),
+      } as never,
+      {
+        buildProvider: () => provider,
+        // By the time the gate is asked about "Read", the provider call that
+        // streamed its `tool_use` has already completed NORMALLY —
+        // `currentStepAbort` is back to null (`run-chat-turn-neutral.ts`'s
+        // step loop clears it in a `finally` right after the stream ends) —
+        // so this push cannot interrupt anything. It just queues, exactly
+        // like a real steer typed while a tool call is running would.
+        wrapGate: (gate) => (name, input, ctx) => {
+          if (name === "Read") channel.push("stop, wrong file")
+          return gate(name, input, ctx)
+        },
+      },
+    )
+
+    // Two provider calls, not an interrupted-and-resubmitted turn: the tool
+    // ran, its result came back, and the queued steer was delivered at the
+    // very next step boundary like any other boundary steer.
+    expect(calls).toBe(2)
+    expect(events.filter((e) => e.kind === "resubmit_required")).toEqual([])
+    expect(result.turn.toolResults.tu_1).toMatchObject({ ok: true })
+
+    const replayable = events.filter((e) => e.kind !== "resubmit_required")
+    const stream = liveSse()
+    const chatResponses: Response[] = [stream.response]
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/editor/chat/steer") return Promise.resolve(jsonResponse(200, { accepted: true }))
+      if (url === "/api/editor/chat") {
+        const next = chatResponses.shift()
+        if (!next) return Promise.reject(new Error("unexpected extra POST /api/editor/chat"))
+        return Promise.resolve(next)
+      }
+      return Promise.resolve(jsonResponse(200, { ok: true }))
+    })
+
+    const { result: hook } = renderHook(() => useEditorChat(soloOptions))
+    let running!: Promise<void>
+    await act(async () => {
+      running = hook.current.submit("first")
+      await drain()
+    })
+    await act(async () => {
+      stream.push({ kind: "session", sessionId: SESSION_ID, projectId: "p1" })
+      await drain()
+    })
+    for (const event of replayable) {
+      if (event.kind === "steered") {
+        await act(async () => {
+          await hook.current.steer(event.userMessage)
+          await drain()
+        })
+      }
+      await act(async () => {
+        stream.push(event)
+        await drain()
+      })
+    }
+    await act(async () => {
+      stream.close()
+      await running
+    })
+
+    const live = shapeOf(hook.current.messages)
+    const liveEmpties = emptyAssistants(hook.current.messages)
+    act(() => {
+      hook.current.hydrateFromTranscript([result.turn])
+    })
+    const hydrated = shapeOf(hook.current.messages)
+    const hydratedEmpties = emptyAssistants(hook.current.messages)
+
+    expect(liveEmpties).toEqual([])
+    expect(hydratedEmpties).toEqual([])
+    expect(hydrated).toEqual(live)
+
+    const turnId = result.turn.id
+    expect(live).toEqual([
+      user("first"),
+      assistant(turnId, "tool:tu_1:ok"),
+      user("stop, wrong file"),
+      assistant(`${turnId}:cont-1`, "text:done"),
+    ])
   })
 })
