@@ -26,15 +26,28 @@ describe('isMcpStdioServerConfig', () => {
 })
 
 describe('isValidMcpServerId', () => {
-  it('accepts letters, digits and hyphens', () => {
-    expect(isValidMcpServerId('figma')).toBe(true)
-    expect(isValidMcpServerId('figma-dev')).toBe(true)
-    expect(isValidMcpServerId('Server2')).toBe(true)
+  it('accepts letters, digits, hyphens and single inner underscores', () => {
+    for (const id of ['figma', 'figma-dev', 'Server2', 'my_server', 'a_b_c', 'a-_-b']) {
+      expect(isValidMcpServerId(id), id).toBe(true)
+    }
   })
 
-  it('refuses anything that could put a `__` in a tool name, or a `.`', () => {
-    for (const id of ['editor__figma', 'a__b', 'a_', '_a', 'my_server', 'a.b', '', 'a b']) {
+  it('refuses anything that could put a `__` where the gate splits, or a `.`', () => {
+    for (const id of ['editor__figma', 'a__b', '_x', 'x_', '_', 'a.b', '', 'a b']) {
       expect(isValidMcpServerId(id), id).toBe(false)
+    }
+  })
+
+  it('keeps the first `__` after mcp__ at the separator for every accepted id', () => {
+    // The gate's own extraction, as `handleExtensionTool` does it.
+    const idOf = (toolName: string): string => {
+      const rest = toolName.slice('mcp__'.length)
+      return rest.slice(0, rest.indexOf('__'))
+    }
+    for (const id of ['figma', 'my_server', 'a_b_c', 'a-_-b', 'x-']) {
+      expect(isValidMcpServerId(id), id).toBe(true)
+      expect(idOf(`mcp__${id}__get_thing`), id).toBe(id)
+      expect(idOf(`mcp__${id}___leading_underscore_tool`), id).toBe(id)
     }
   })
 })

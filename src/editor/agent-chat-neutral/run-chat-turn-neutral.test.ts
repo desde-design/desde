@@ -1722,6 +1722,42 @@ describe('MCP servers on the neutral lane (Figma, .mcp.json)', () => {
     }
   })
 
+  it('starts an id with a single inner underscore, and refuses one with a leading or trailing underscore', async () => {
+    // `x_` would name its tools `mcp__x___echo`, which the gate reads as id
+    // `x`. `my_server` cannot be misread: a single `_` never forms `__`.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { events, calls, result } = await run(
+        [toolStep('tu_1', 'mcp__my_server__echo', { text: 'underscored' }), textStep('ok')],
+        {
+          extensions: [
+            { id: 'my_server', mcpServer: echoServer, allowedToolPrefixes: null },
+            { id: '_x', mcpServer: echoServer, allowedToolPrefixes: null },
+            { id: 'x_', mcpServer: echoServer, allowedToolPrefixes: null },
+          ],
+        },
+      )
+      const names = calls[0]!.tools!.map((t) => ('name' in t ? t.name : ''))
+      expect(names).toContain('mcp__my_server__echo')
+      expect(names.some((n) => n.startsWith('mcp___x') || n.startsWith('mcp__x_'))).toBe(false)
+      const res = events.find((e) => e.kind === 'tool_result') as { ok: boolean; output: unknown }
+      expect(res.ok).toBe(true)
+      expect(JSON.stringify(res.output)).toContain('underscored')
+      const text = (calls[0]!.system as TextBlock[])[0]!.text
+      for (const id of ['_x', 'x_']) {
+        expect(text).toContain(
+          `The MCP server "${id}" could not be started this turn, so its tools are unavailable.`,
+        )
+      }
+      expect(text).not.toContain('The MCP server "my_server"')
+      expect(result.turn.error).toBeUndefined()
+      const refused = warn.mock.calls.filter((c) => /its id is not allowed/.test(String(c[0])))
+      expect(refused).toHaveLength(2)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('leaves the prompt unchanged when no MCP server is configured', async () => {
     const plain = await run([textStep('ok')])
     const withNone = await run([textStep('ok')], { extensions: [] })

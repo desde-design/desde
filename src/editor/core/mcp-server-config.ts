@@ -31,15 +31,24 @@ export function isMcpStdioServerConfig(v: unknown): v is McpStdioServerConfig {
  * The rule an MCP server id must meet, stated for error messages.
  *
  * An id becomes the middle of every tool name, `mcp__<id>__<tool>`, and the
- * permission gate finds the id again by reading up to the first `__` after
- * `mcp__`. An id containing `__` therefore splits in the wrong place: id
- * `editor__figma` reads as the built-in `editor` namespace and skips the
- * read-only policy, and id `a__b` inherits the policy of `a`. Letters, digits
- * and `-` cannot form `__`, and `.` is refused by model providers anyway.
+ * permission gate (`handleExtensionTool` in `edit-ack.ts`) finds the id again
+ * by reading up to the FIRST `__` after `mcp__`. An id containing `__`
+ * therefore splits in the wrong place: id `editor__figma` reads as the
+ * built-in `editor` namespace and skips the read-only policy, and id `a__b`
+ * inherits the policy of `a`. A trailing `_` does the same, because it joins
+ * the separator: `x_` gives `mcp__x___tool`, read as id `x`. A leading `_` is
+ * refused to keep the rule symmetric.
+ *
+ * Under this rule the first `__` after `mcp__` is always the separator: the id
+ * holds no `__`, and its last character is never `_`. A single `_` inside the
+ * id (`my_server`) is safe and allowed. `.` is refused, as model providers
+ * refuse it in a tool name.
  */
-export const MCP_SERVER_ID_RULE = 'letters, digits and "-" only'
+export const MCP_SERVER_ID_RULE =
+  'letters, digits, "-" and "_", with no "__" and no "_" at the start or end'
 
-const MCP_SERVER_ID = /^[A-Za-z0-9-]+$/
+/** Each `_` sits between two non-`_` characters. */
+const MCP_SERVER_ID = /^[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*$/
 
 /** Whether `id` meets {@link MCP_SERVER_ID_RULE}. Used at load AND at connect. */
 export function isValidMcpServerId(id: string): boolean {
