@@ -90,6 +90,117 @@ describe('replayHistory', () => {
     })
   })
 
+  it('replays server tool blocks inside the assistant message, never as a user tool_result', async () => {
+    const fetched = { type: 'web_fetch_result', url: 'https://example.com/', content: { title: 'Example Domain' } }
+    const messages = await replayHistory({
+      repoRoot: root,
+      session: sessionWith([
+        turn({
+          userMessage: 'fetch it',
+          assistantContent: [
+            { type: 'text', text: 'Fetching.' },
+            {
+              type: 'server_tool_use',
+              toolUseId: 'srv_1',
+              name: 'web_fetch',
+              input: { url: 'https://example.com/' },
+              providerMetadata: { anthropic: { caller: { type: 'direct' } } },
+            },
+            { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output: fetched },
+            { type: 'text', text: 'It is Example Domain.' },
+          ],
+        }),
+      ]),
+    })
+    expect(messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'fetch it' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Fetching.' },
+          {
+            type: 'server_tool_use',
+            id: 'srv_1',
+            name: 'web_fetch',
+            input: { url: 'https://example.com/' },
+            providerMetadata: { anthropic: { caller: { type: 'direct' } } },
+          },
+          { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output: fetched },
+          { type: 'text', text: 'It is Example Domain.' },
+        ],
+      },
+    ])
+  })
+
+  it('keeps an errored server result marked as an error on replay', async () => {
+    const messages = await replayHistory({
+      repoRoot: root,
+      session: sessionWith([
+        turn({
+          assistantContent: [
+            { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_fetch', input: {} },
+            {
+              type: 'server_tool_result',
+              toolUseId: 'srv_1',
+              name: 'web_fetch',
+              output: { errorCode: 'url_not_accessible' },
+              isError: true,
+            },
+            { type: 'text', text: 'Could not.' },
+          ],
+        }),
+      ]),
+    })
+    expect(messages[1].content[1]).toEqual({
+      type: 'server_tool_result',
+      toolUseId: 'srv_1',
+      name: 'web_fetch',
+      output: { errorCode: 'url_not_accessible' },
+      isError: true,
+    })
+  })
+
+  it('opens a new assistant message for a server call made in a later step than a function call', async () => {
+    // Step 1: Read. Step 2: a web search. Collapsing them would put the
+    // search BEFORE the Read result that the model had already seen.
+    const messages = await replayHistory({
+      repoRoot: root,
+      session: sessionWith([
+        turn({
+          assistantContent: [
+            { type: 'tool_use', toolUseId: 'tu_1', name: 'Read', input: {} },
+            { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_search', input: { query: 'q' } },
+            { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_search', output: [] },
+            { type: 'text', text: 'done' },
+          ],
+          toolResults: { tu_1: { ok: true, output: 'x' } },
+        }),
+      ]),
+    })
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect((messages[3].content as ReadonlyArray<{ type: string }>).map((b) => b.type)).toEqual([
+      'server_tool_use',
+      'server_tool_result',
+      'text',
+    ])
+  })
+
+  it('drops a server call whose result never arrived, because the vendor rejects an unpaired one', async () => {
+    const messages = await replayHistory({
+      repoRoot: root,
+      session: sessionWith([
+        turn({
+          assistantContent: [
+            { type: 'text', text: 'Searching.' },
+            { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_search', input: { query: 'q' } },
+          ],
+          error: 'turn aborted',
+        }),
+      ]),
+    })
+    expect(messages[1]).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching.' }] })
+  })
+
   it('replays steers as their own user messages, in recorded order', async () => {
     const messages = await replayHistory({
       repoRoot: root,

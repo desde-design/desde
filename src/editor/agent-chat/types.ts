@@ -171,9 +171,36 @@ export interface ChatSteeredMessage {
   afterAssistantBlocks: number
 }
 
+/**
+ * One block of a turn's reply, in stream order.
+ *
+ * `server_tool_use` / `server_tool_result` are a web search or web fetch the
+ * VENDOR ran inside its own response (see `ServerToolDef` in
+ * `llm-providers/types.ts`). Unlike `tool_use`, the result is stored as its
+ * own block rather than in `ChatTurn.toolResults`, because Desde never ran
+ * it: `output` is the vendor's payload, kept verbatim so the next request can
+ * replay it to the same vendor, and `providerMetadata` is the opaque vendor
+ * data that has to travel with it. The panel shows a summary of `output`
+ * (`describeServerToolOutput`), never the payload itself.
+ */
 export type ChatAssistantBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; toolUseId: string; name: string; input: unknown }
+  | {
+      type: 'server_tool_use'
+      toolUseId: string
+      name: string
+      input: unknown
+      providerMetadata?: Record<string, unknown>
+    }
+  | {
+      type: 'server_tool_result'
+      toolUseId: string
+      name: string
+      output: unknown
+      isError?: boolean
+      providerMetadata?: Record<string, unknown>
+    }
 
 export interface ChatToolResult {
   ok: boolean

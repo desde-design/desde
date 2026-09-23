@@ -35,6 +35,63 @@ describe('createNeutralEventAdapter', () => {
     ])
   })
 
+  it('maps a server tool call to tool_use_start, so the panel renders it like any tool', () => {
+    expect(
+      take({ kind: 'server_tool_use', id: 'srv_1', name: 'web_fetch', input: { url: 'https://example.com/' } }),
+    ).toEqual([
+      {
+        kind: 'tool_use_start',
+        turnId: TURN,
+        toolUseId: 'srv_1',
+        name: 'web_fetch',
+        input: { url: 'https://example.com/' },
+      },
+    ])
+  })
+
+  it('maps a server tool result to tool_result carrying the short summary, not the raw payload', () => {
+    expect(
+      take({
+        kind: 'server_tool_result',
+        toolUseId: 'srv_1',
+        name: 'web_fetch',
+        output: {
+          type: 'web_fetch_result',
+          url: 'https://example.com/',
+          content: { title: 'Example Domain', source: { data: 'BODY' } },
+        },
+      }),
+    ).toEqual([
+      {
+        kind: 'tool_result',
+        turnId: TURN,
+        toolUseId: 'srv_1',
+        ok: true,
+        output: 'Fetched https://example.com/: Example Domain',
+      },
+    ])
+  })
+
+  it('maps an errored server tool result to a failed tool_result', () => {
+    expect(
+      take({
+        kind: 'server_tool_result',
+        toolUseId: 'srv_1',
+        name: 'web_fetch',
+        output: { errorCode: 'url_not_accessible' },
+        isError: true,
+      }),
+    ).toEqual([
+      {
+        kind: 'tool_result',
+        turnId: TURN,
+        toolUseId: 'srv_1',
+        ok: false,
+        error: 'The provider could not complete this: url_not_accessible.',
+      },
+    ])
+  })
+
   it('maps usage', () => {
     expect(take({ kind: 'usage', inputTokens: 10, outputTokens: 3 })).toEqual([
       { kind: 'usage', turnId: TURN, inputTokens: 10, outputTokens: 3 },

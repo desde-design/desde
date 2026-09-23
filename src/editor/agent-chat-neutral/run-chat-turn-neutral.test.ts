@@ -430,6 +430,101 @@ function alwaysRateLimited(retryAfter: string): {
   return { provider, attempts: () => attempts }
 }
 
+describe('runChatTurnNeutral: provider server-side web tools', () => {
+  const serverDefs = (calls: StreamOpts[]) =>
+    calls[0]!.tools.filter((t) => t.kind === 'server')
+
+  it('declares nothing when the web policy turns nothing on', async () => {
+    const { calls } = await run([textStep('done')], {
+      webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: false },
+    })
+    expect(serverDefs(calls)).toEqual([])
+  })
+
+  it('declares fetch with the allowlist and search, on a provider that serves both', async () => {
+    const { calls } = await run([textStep('done')], {
+      providerId: 'anthropic',
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
+    })
+    expect(serverDefs(calls)).toEqual([
+      { kind: 'server', id: 'web_search' },
+      { kind: 'server', id: 'web_fetch', allowedDomains: ['example.com'] },
+    ])
+  })
+
+  it('declares only the ids the chosen provider lists in webTools', async () => {
+    // OpenAI has no fetch tool. Declaring one anyway would be a promise the
+    // transport silently drops, so the loop does not ask for it.
+    const { calls } = await run([textStep('done')], {
+      providerId: 'openai',
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: true },
+    })
+    expect(serverDefs(calls)).toEqual([{ kind: 'server', id: 'web_search' }])
+  })
+
+  it('does not declare fetch when the allowlist is empty, even with search on', async () => {
+    const { calls } = await run([textStep('done')], {
+      webPolicy: { webFetchAllowedHosts: [], webSearchEnabled: true },
+    })
+    expect(serverDefs(calls)).toEqual([{ kind: 'server', id: 'web_search' }])
+  })
+
+  it('streams a vendor-run call as a tool, persists both blocks, and runs nothing itself', async () => {
+    const output = {
+      type: 'web_fetch_result',
+      url: 'https://example.com/',
+      content: { title: 'Example Domain' },
+    }
+    const step: ProviderEvent[] = [
+      { kind: 'server_tool_use', id: 'srv_1', name: 'web_fetch', input: { url: 'https://example.com/' } },
+      { kind: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output },
+      { kind: 'text_delta', delta: 'Example Domain.' },
+      {
+        kind: 'message_complete',
+        stopReason: 'end_turn',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'server_tool_use', id: 'srv_1', name: 'web_fetch', input: { url: 'https://example.com/' } },
+            { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output },
+            { type: 'text', text: 'Example Domain.' },
+          ],
+        },
+        usage: { inputTokens: 5, outputTokens: 5 },
+      },
+    ]
+    const { events, result, calls } = await run([step], {
+      webPolicy: { webFetchAllowedHosts: ['example.com'], webSearchEnabled: false },
+    })
+    // One request: the vendor ran the fetch, so there is no second step.
+    expect(calls).toHaveLength(1)
+    expect(result.turn.error).toBeUndefined()
+    expect(events.filter((e) => e.kind === 'tool_use_start' || e.kind === 'tool_result')).toEqual([
+      {
+        kind: 'tool_use_start',
+        turnId: expect.any(String),
+        toolUseId: 'srv_1',
+        name: 'web_fetch',
+        input: { url: 'https://example.com/' },
+      },
+      {
+        kind: 'tool_result',
+        turnId: expect.any(String),
+        toolUseId: 'srv_1',
+        ok: true,
+        output: 'Fetched https://example.com/: Example Domain',
+      },
+    ])
+    expect(result.turn.assistantContent).toEqual([
+      { type: 'server_tool_use', toolUseId: 'srv_1', name: 'web_fetch', input: { url: 'https://example.com/' } },
+      { type: 'server_tool_result', toolUseId: 'srv_1', name: 'web_fetch', output },
+      { type: 'text', text: 'Example Domain.' },
+    ])
+    // Nothing was recorded as a Desde-run tool result.
+    expect(result.turn.toolResults).toEqual({})
+  })
+})
+
 describe('runChatTurnNeutral: failures', () => {
   it('retries a transient failure that produced no output, and reports the wait', async () => {
     let attempts = 0

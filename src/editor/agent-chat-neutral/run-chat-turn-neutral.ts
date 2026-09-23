@@ -88,10 +88,14 @@ import type {
   LLMProvider,
   Message,
   ProviderEvent,
+  ServerToolDef,
+  ServerToolId,
   StreamOpts,
   TextBlock,
+  ToolDef,
   Usage,
 } from '../llm-providers/types'
+import type { WebPolicy } from '../core/web-policy'
 import { branchModeRootCommitSha } from '../worktree/git-branches'
 
 import { applyContextBudget, capToolResultImageBytes } from './context-budget'
@@ -444,8 +448,10 @@ async function runInner(
   })
   const gate = deps.wrapGate ? deps.wrapGate(builtGate) : builtGate
 
+  const serverTools = serverToolDefs(opts.webPolicy, descriptor.capabilities.webTools)
   const system = buildNeutralSystemPrompt({
     writeToolsEnabled: byName.has('Write'),
+    ...(serverTools.length > 0 ? { webTools: serverTools.map((t) => t.id) } : {}),
     groundingEnabled: opts.getGrounding !== undefined,
     ...(groundingDigest ? { groundingDigest } : {}),
     canvasEnabled: opts.canvasEnabled === true,
@@ -453,7 +459,7 @@ async function runInner(
     ...(opts.projectKnowledge ? { projectKnowledge: opts.projectKnowledge } : {}),
     disabledCapabilities: opts.disabledCapabilities ?? null,
   })
-  const tools = toToolDefs(catalog)
+  const tools: ToolDef[] = [...toToolDefs(catalog), ...serverTools]
 
   const history = await replayHistory({
     session: opts.session,
@@ -1098,10 +1104,57 @@ function providerOptionsFor(
   return Object.keys(fields).length > 0 ? { providerOptions: fields } : {}
 }
 
+/**
+ * The provider server tools this turn declares: web search and web fetch,
+ * which the VENDOR runs inside its own response.
+ *
+ * Two gates, both required. The web policy (`desde.config.json`) is the
+ * user's decision and is off by default; the descriptor's `webTools` says
+ * which of the two this provider's vendor actually has. Fetch is declared
+ * only with a non-empty allowlist, passed as the vendor's `allowedDomains`,
+ * because on this lane the vendor does the fetching and that list is the
+ * only control Desde still holds over where it goes. The policy's own
+ * exact-host check cannot run here: no Desde code sees the request.
+ */
+function serverToolDefs(
+  policy: WebPolicy | undefined,
+  offered: ReadonlyArray<ServerToolId>,
+): ServerToolDef[] {
+  if (!policy) return []
+  const defs: ServerToolDef[] = []
+  if (policy.webSearchEnabled && offered.includes('web_search')) {
+    defs.push({ kind: 'server', id: 'web_search' })
+  }
+  if (policy.webFetchAllowedHosts.length > 0 && offered.includes('web_fetch')) {
+    defs.push({ kind: 'server', id: 'web_fetch', allowedDomains: [...policy.webFetchAllowedHosts] })
+  }
+  return defs
+}
+
 function toChatBlock(block: AssistantContent): ChatAssistantBlock {
-  return block.type === 'text'
-    ? { type: 'text', text: block.text }
-    : { type: 'tool_use', toolUseId: block.id, name: block.name, input: block.input }
+  switch (block.type) {
+    case 'text':
+      return { type: 'text', text: block.text }
+    case 'tool_use':
+      return { type: 'tool_use', toolUseId: block.id, name: block.name, input: block.input }
+    case 'server_tool_use':
+      return {
+        type: 'server_tool_use',
+        toolUseId: block.id,
+        name: block.name,
+        input: block.input,
+        ...(block.providerMetadata ? { providerMetadata: block.providerMetadata } : {}),
+      }
+    case 'server_tool_result':
+      return {
+        type: 'server_tool_result',
+        toolUseId: block.toolUseId,
+        name: block.name,
+        output: block.output,
+        ...(block.isError ? { isError: true } : {}),
+        ...(block.providerMetadata ? { providerMetadata: block.providerMetadata } : {}),
+      }
+  }
 }
 
 function filesOf(payload: EditProposalPayload): string[] {

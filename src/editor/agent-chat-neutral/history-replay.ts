@@ -18,6 +18,15 @@
  *  2. An assistant message with no content blocks is rejected. A turn that
  *     errored before the model said anything has exactly that shape, so it
  *     contributes its user message and nothing else.
+ *
+ * Server tools (the vendor-run web search and fetch) follow a different rule.
+ * Their call AND result are both assistant content, replayed inside the
+ * assistant message exactly as the vendor produced them, and never as a user
+ * `tool_result`: Desde did not run them, and the vendor would read a user
+ * result as the answer to a function call it never made. A server call with
+ * no result on the turn (the user stopped it mid-search) is dropped, because
+ * the vendor rejects an unpaired one the same way it rejects an orphan
+ * `tool_use`.
  */
 
 import type { ChatSession, ChatTurn } from '../agent-chat/types'
@@ -76,7 +85,42 @@ function replayTurn(turn: ChatTurn): Message[] {
       pendingResults.length = 0
     }
   }
+  // Server calls that got a result on this turn. A call without one is
+  // dropped below, and so is a result whose call is missing.
+  const serverCalls = new Set(
+    turn.assistantContent.flatMap((b) => (b.type === 'server_tool_use' ? [b.toolUseId] : [])),
+  )
+  const pairedServerIds = new Set(
+    turn.assistantContent.flatMap((b) =>
+      b.type === 'server_tool_result' && serverCalls.has(b.toolUseId) ? [b.toolUseId] : [],
+    ),
+  )
   for (const block of turn.assistantContent) {
+    if (block.type === 'server_tool_use' || block.type === 'server_tool_result') {
+      if (!pairedServerIds.has(block.toolUseId)) continue
+      // Same step rule as text: after a function tool's result, anything the
+      // model produced came from a LATER step and opens a new message.
+      if (pendingResults.length > 0) flush()
+      assistant.push(
+        block.type === 'server_tool_use'
+          ? {
+              type: 'server_tool_use',
+              id: block.toolUseId,
+              name: block.name,
+              input: block.input,
+              ...(block.providerMetadata ? { providerMetadata: block.providerMetadata } : {}),
+            }
+          : {
+              type: 'server_tool_result',
+              toolUseId: block.toolUseId,
+              name: block.name,
+              output: block.output,
+              ...(block.isError ? { isError: true } : {}),
+              ...(block.providerMetadata ? { providerMetadata: block.providerMetadata } : {}),
+            },
+      )
+      continue
+    }
     if (block.type === 'text') {
       // A text block after a tool result opens a NEW assistant message: the
       // model produced it in a later step, and collapsing the two would put

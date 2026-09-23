@@ -146,6 +146,11 @@ type MessagePart =
   /** An extended-thinking delta. Streams as `thinking_delta`, persists nowhere. */
   | { part: "reasoning"; text: string }
   | { part: "tool"; id: string; name: string }
+  /**
+   * A web tool the VENDOR runs inside the response (neutral lane only): its
+   * call and its result stream back together, and the loop runs nothing.
+   */
+  | { part: "server"; id: string; name: string; error?: boolean }
   /** The user hits Enter at exactly this point in the stream. */
   | { part: "steer"; text: string }
 
@@ -218,7 +223,7 @@ function toolResultMessage(toolUseId: string): Record<string, unknown> {
 function completedContent(parts: readonly MessagePart[]): Array<Record<string, unknown>> {
   const content: Array<Record<string, unknown>> = []
   for (const part of parts) {
-    if (part.part === "steer") continue
+    if (part.part === "steer" || part.part === "server") continue
     if (part.part === "tool") {
       content.push({ type: "tool_use", id: part.id, name: part.name, input: {} })
       continue
@@ -395,6 +400,26 @@ function neutralProvider(script: ScriptStep[], channel: ReturnType<typeof create
               sawTool = true
               yield { kind: "tool_use", id: part.id, name: part.name, input: {} }
               content.push({ type: "tool_use", id: part.id, name: part.name, input: {} })
+            } else if (part.part === "server") {
+              const output = part.error
+                ? { errorCode: "url_not_accessible" }
+                : { url: "https://example.com/", content: { title: "Example Domain" } }
+              yield { kind: "server_tool_use", id: part.id, name: part.name, input: {} }
+              yield {
+                kind: "server_tool_result",
+                toolUseId: part.id,
+                name: part.name,
+                output,
+                ...(part.error ? { isError: true } : {}),
+              }
+              content.push({ type: "server_tool_use", id: part.id, name: part.name, input: {} })
+              content.push({
+                type: "server_tool_result",
+                toolUseId: part.id,
+                name: part.name,
+                output,
+                ...(part.error ? { isError: true } : {}),
+              })
             }
           }
         }
@@ -982,6 +1007,44 @@ describe("known divergences: live and hydrated already disagree", () => {
 // ---------------------------------------------------------------------------
 
 const NEUTRAL_EQUAL_CASES: Array<{ name: string; script: ScriptStep[] }> = [
+  {
+    // A vendor-run web call persists as TWO blocks (call, result) but renders
+    // as ONE tool disclosure. Hydration must merge them the way the live
+    // stream does, or a reload shows a different transcript.
+    name: "control: text, a vendor-run fetch, an errored one, then text",
+    script: [
+      {
+        step: "message",
+        id: "m1",
+        parts: [
+          { part: "delta", text: "fetching" },
+          { part: "server", id: "srv_1", name: "web_fetch" },
+          { part: "server", id: "srv_2", name: "web_fetch", error: true },
+          { part: "delta", text: "it is Example Domain" },
+        ],
+      },
+    ],
+  },
+  {
+    // The steer's recorded position counts the PERSISTED blocks, which
+    // include the server result block the panel never shows. The cut has to
+    // land after the tool step either way.
+    name: "steer at a tool boundary after a vendor-run search",
+    script: [
+      {
+        step: "message",
+        id: "m1",
+        parts: [
+          { part: "server", id: "srv_1", name: "web_search" },
+          { part: "delta", text: "reading the file" },
+          { part: "tool", id: "tu_1", name: "Read" },
+        ],
+      },
+      { step: "steer", text: "use the other file" },
+      { step: "toolResult", id: "tu_1" },
+      { step: "message", id: "m2", parts: [{ part: "delta", text: "understood" }] },
+    ],
+  },
   {
     name: "control: one message, text only",
     script: [{ step: "message", id: "m1", parts: [{ part: "delta", text: "done" }] }],

@@ -13,9 +13,16 @@
  *  - `rate_limit_warning`: Anthropic-only by decision. Its fields model
  *    Anthropic's subscription overage pool and its banner says "this Claude
  *    account". See `ANTHROPIC_ONLY_EVENT_KINDS` in `chat-stream-events.ts`.
+ *
+ * A server tool (the vendor-run web search and fetch) is shown with the SAME
+ * two frames a Desde-run tool uses, `tool_use_start` then `tool_result`, so
+ * the panel renders it with its ordinary tool disclosure. The difference is
+ * only who emits the result: here, straight off the vendor's stream, instead
+ * of the loop after it ran the tool.
  */
 
 import type { ChatStreamEvent } from '../agent-chat/chat-stream-events'
+import { describeServerToolOutput } from '../agent-chat/server-tool-display'
 import type { ToolHandlerResult } from '../agent-chat/tool-spec'
 import type {
   ImageContent,
@@ -54,6 +61,27 @@ export function createNeutralEventAdapter(turnId: string): NeutralEventAdapter {
             input: ev.input,
           }
           return
+        case 'server_tool_use':
+          if (announced.has(ev.id)) return
+          announced.add(ev.id)
+          yield {
+            kind: 'tool_use_start',
+            turnId,
+            toolUseId: ev.id,
+            name: ev.name,
+            input: ev.input,
+          }
+          return
+        case 'server_tool_result': {
+          // A summary, not the payload: a fetch result is the whole page and a
+          // search result carries an encrypted blob per hit. The payload is
+          // persisted on the turn for replay; the frame is for reading.
+          const text = describeServerToolOutput(ev.output)
+          yield ev.isError === true
+            ? { kind: 'tool_result', turnId, toolUseId: ev.toolUseId, ok: false, error: text }
+            : { kind: 'tool_result', turnId, toolUseId: ev.toolUseId, ok: true, output: text }
+          return
+        }
         case 'usage':
           yield {
             kind: 'usage',

@@ -30,7 +30,12 @@ import type {
   ChatStreamEvent,
   EditProposal,
 } from "@/editor/agent-chat/chat-stream-events"
-import type { ChatSteeredMessage, ChatTurn } from "@/editor/agent-chat/types"
+import type {
+  ChatAssistantBlock,
+  ChatSteeredMessage,
+  ChatTurn,
+} from "@/editor/agent-chat/types"
+import { describeServerToolOutput } from "@/editor/agent-chat/server-tool-display"
 import type { SessionModelConfig } from "@/editor/core/model-catalog"
 import {
   appendPendingSteer,
@@ -2167,8 +2172,34 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
       id: `${turn.id}:user`,
       text: turn.userMessage,
     })
-    const blocks: AssistantBlockUi[] = turn.assistantContent.map((b) => {
+    // A server tool (the vendor-run web search and fetch) persists its result
+    // as its own block. It renders merged into its call, like any tool, so
+    // the result block maps to `null` HERE and is filtered per segment below.
+    // Filtering first would shift every later index, and the steer positions
+    // (`afterAssistantBlocks`) count the persisted blocks.
+    const serverResults = new Map<string, Extract<ChatAssistantBlock, { type: "server_tool_result" }>>()
+    for (const b of turn.assistantContent) {
+      if (b.type === "server_tool_result") serverResults.set(b.toolUseId, b)
+    }
+    const blocks: Array<AssistantBlockUi | null> = turn.assistantContent.map((b) => {
       if (b.type === "text") return { type: "text", text: b.text }
+      if (b.type === "server_tool_result") return null
+      if (b.type === "server_tool_use") {
+        const served = serverResults.get(b.toolUseId)
+        const summary = served ? describeServerToolOutput(served.output) : undefined
+        return {
+          type: "tool_use",
+          toolUseId: b.toolUseId,
+          name: b.name,
+          input: b.input,
+          result:
+            served === undefined || summary === undefined
+              ? undefined
+              : served.isError
+                ? { ok: false, error: summary }
+                : { ok: true, output: summary },
+        }
+      }
       const result = turn.toolResults[b.toolUseId]
       return {
         type: "tool_use",
@@ -2194,12 +2225,15 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
     turn.steers?.forEach((steer, i) => {
       const at = Math.min(Math.max(steer.afterAssistantBlocks, cursor), blocks.length)
       if (at > cursor) {
-        out.push({
-          kind: "assistant",
-          id: assistantSegmentId(turn.id, segment),
-          blocks: blocks.slice(cursor, at),
-        })
-        segment += 1
+        const shown = blocks.slice(cursor, at).filter(isShownBlock)
+        if (shown.length > 0) {
+          out.push({
+            kind: "assistant",
+            id: assistantSegmentId(turn.id, segment),
+            blocks: shown,
+          })
+          segment += 1
+        }
         cursor = at
       }
       out.push({
@@ -2220,7 +2254,7 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
     // this makes the rule uniform rather than adding a new one. Nothing is
     // lost: every block still renders exactly once, because `cursor` only ever
     // moves forward and a non-empty tail is still always pushed.
-    const tail = blocks.slice(cursor)
+    const tail = blocks.slice(cursor).filter(isShownBlock)
     if (tail.length > 0) {
       out.push({
         kind: "assistant",
@@ -2237,6 +2271,10 @@ function turnsToChatMessages(turns: ChatTurn[]): ChatMessage[] {
     }
   }
   return out
+}
+
+function isShownBlock(b: AssistantBlockUi | null): b is AssistantBlockUi {
+  return b !== null
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   NEUTRAL_INVESTIGATE_BLOCK,
   NEUTRAL_STEERING_BLOCK,
   neutralBuiltinToolsBlock,
+  neutralWebToolsBlock,
 } from './system-prompt-neutral'
 
 describe('buildNeutralSystemPrompt', () => {
@@ -99,7 +100,7 @@ describe('buildNeutralSystemPrompt', () => {
     expect(p).toMatch(/before asking/i)
   })
 
-  it('never offers WebFetch or WebSearch, which this lane does not serve', () => {
+  it('offers no web tool when none is declared for the turn', () => {
     const p = buildNeutralSystemPrompt({ writeToolsEnabled: true })
     expect(p).not.toContain('Web tools')
     expect(p).not.toContain('WebSearch')
@@ -109,6 +110,21 @@ describe('buildNeutralSystemPrompt', () => {
     // a tool. The block is byte-frozen, so it cannot be reworded here.
     expect(p.match(/WebFetch/g) ?? []).toHaveLength(1)
     expect(p).toContain('only from a host already allowlisted for WebFetch')
+  })
+
+  it('describes exactly the provider web tools declared, with the untrusted-content rule', () => {
+    const both = buildNeutralSystemPrompt({ webTools: ['web_search', 'web_fetch'] })
+    expect(both).toContain('# Web tools')
+    expect(both).toContain('`web_search`')
+    expect(both).toContain('`web_fetch`')
+    expect(both).toMatch(/UNTRUSTED/)
+    const searchOnly = buildNeutralSystemPrompt({ webTools: ['web_search'] })
+    expect(searchOnly).toContain('`web_search`')
+    expect(searchOnly).not.toContain('`web_fetch`')
+  })
+
+  it('leaves the prompt byte-identical when the web tool list is empty', () => {
+    expect(buildNeutralSystemPrompt({ webTools: [] })).toBe(buildNeutralSystemPrompt({}))
   })
 
   it('describes steering as boundary delivery, not as a system reminder', () => {
@@ -190,6 +206,7 @@ describe('buildNeutralSystemPrompt', () => {
       neutralBuiltinToolsBlock({ writeToolsEnabled: true }),
       NEUTRAL_STEERING_BLOCK,
       NEUTRAL_INVESTIGATE_BLOCK,
+      neutralWebToolsBlock(['web_search', 'web_fetch']),
     ].join('\n\n')
     expect(authored).not.toContain('—')
     expect(authored).not.toMatch(/\b(I|I'm|I've|my|mine)\b/)
