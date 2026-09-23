@@ -45,10 +45,12 @@ const EXPECTED_ADAPTIVE: Record<string, boolean> = {
 }
 
 const ADAPTIVE_CONFIG = { type: 'adaptive', display: 'summarized' } as const
+// No `display` here: `@ai-sdk/anthropic`'s `thinking` schema only declares
+// `display` on the `adaptive` member; the `enabled` member has just `type`
+// and `budgetTokens`.
 const FIXED_BUDGET_CONFIG = {
   type: 'enabled',
   budgetTokens: 4000,
-  display: 'summarized',
 } as const
 
 describe('resolveAnthropicThinkingConfig: Anthropic catalog coverage', () => {
