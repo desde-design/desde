@@ -378,11 +378,16 @@ export function ModelPickerChip({
     : -1
   const effortIndex = chosenEffortIndex >= 0 ? chosenEffortIndex : defaultEffortIndex
 
-  // The catalog came from the `claude` command line tool on PATH's own
-  // sign-in, not an API key — dev mode or the subscription sidecar. The badge
-  // names that so a chat that stops working when that sign-in ends is not a
-  // surprise.
-  const runsOnSubscription = catalog.source === "cli"
+  // The SELECTED provider's own catalog answered from the `claude` command
+  // line tool on PATH's sign-in, not an API key — dev mode or the
+  // subscription sidecar. Read on `providerCatalog`, not the response-level
+  // `catalog.source`: the two can disagree (Anthropic on `cli` while OpenAI
+  // is `api` in the same response), and only Anthropic HAS a subscription
+  // runtime at all, so a response-level `cli` while an OpenAI model is
+  // selected must not show this badge. The badge names the fact so a chat
+  // that stops working when that sign-in ends is not a surprise.
+  const runsOnSubscription =
+    effective.provider === "anthropic" && providerCatalog.source === "cli"
 
   return (
     <span className="inline-flex shrink-0 items-center gap-1">

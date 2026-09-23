@@ -96,6 +96,15 @@ export type ModelCatalogSource = "api" | "cli" | "static"
 
 export interface ResolvedModelCatalogs {
   catalogs: ProviderModelCatalog[]
+  /**
+   * Each SERVED provider's own source, keyed by `providerId`. `source`
+   * below is the WEAKEST of these (see its own doc comment) — informational,
+   * cache-TTL-driving, and not what a per-provider reading like the model
+   * chip's "subscription (dev)" badge should key on: Anthropic can be `cli`
+   * while OpenAI is `api` in the same response, and a badge keyed on the
+   * aggregate would say so about the wrong provider.
+   */
+  sourceByProvider: Readonly<Record<string, ModelCatalogSource>>
   source: ModelCatalogSource
 }
 
@@ -108,6 +117,7 @@ export const STATIC_MODEL_CATALOGS: ResolvedModelCatalogs = {
   catalogs: [
     withDefaultEffort(ANTHROPIC_MODEL_CATALOG, getDescriptor("anthropic")?.effort.defaultLevel),
   ],
+  sourceByProvider: { anthropic: "static" },
   source: "static",
 }
 
@@ -354,7 +364,11 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
       )
       const fallback = precedenceId ? getDescriptor(precedenceId) : descriptors[0]
       if (fallback) logUnknownRateCardsOnce(fallback, fallback.staticCatalog)
-      return { catalogs: fallback ? [servedStaticCatalog(fallback)] : [], source: "static" }
+      return {
+        catalogs: fallback ? [servedStaticCatalog(fallback)] : [],
+        sourceByProvider: fallback ? { [fallback.id]: "static" } : {},
+        source: "static",
+      }
     }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -380,7 +394,13 @@ export function createModelCatalogResolver(deps: ModelCatalogResolverDeps = {}):
         : results.some((r) => r.source === "cli")
           ? "cli"
           : "api"
-      return { catalogs, source }
+      // Index-aligned with `credentialed`/`results`: each provider's OWN
+      // source, not the aggregate weakest one above.
+      const sourceByProvider: Record<string, ModelCatalogSource> = {}
+      for (let i = 0; i < credentialed.length; i++) {
+        sourceByProvider[credentialed[i].id] = results[i].source
+      }
+      return { catalogs, sourceByProvider, source }
     } finally {
       clearTimeout(timer)
     }

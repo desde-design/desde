@@ -76,6 +76,16 @@ export interface ModelCatalogEntry extends ProviderModelCatalog {
    * hand-built `ResolvedModelCatalogs` in a test.
    */
   label: string
+  /**
+   * THIS provider's own source — `resolved.sourceByProvider[providerId]`,
+   * not the response-level `source` below. A per-provider reading matters
+   * because the two can disagree: Anthropic can answer from the `claude`
+   * command line tool on PATH's sign-in (`cli`) while OpenAI answers from
+   * its API key (`api`) in the same response, and the model chip's
+   * "subscription (dev)" badge has to know THAT provider's own source, not
+   * whichever is weakest across the whole response.
+   */
+  source: ModelCatalogSource
 }
 
 export interface ModelCatalogResponse {
@@ -129,6 +139,11 @@ export function buildModelCatalogResponse(
       capabilities:
         getDescriptor(catalog.providerId)?.capabilities ?? FALLBACK_CAPABILITIES,
       label: getDescriptor(catalog.providerId)?.label ?? catalog.providerId,
+      // Falls back to the response-level source for a hand-built
+      // `ResolvedModelCatalogs` in a test that omits `sourceByProvider` for
+      // a provider it does carry a catalog for — the real resolver always
+      // populates both in lockstep.
+      source: resolved.sourceByProvider[catalog.providerId] ?? resolved.source,
     })),
     defaultProviderId: primary.providerId,
     default: defaultModelConfig(primary),

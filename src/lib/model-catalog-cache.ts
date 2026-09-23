@@ -41,7 +41,19 @@ export interface ModelCatalogCapabilitiesLike {
 export type ModelCatalogSourceLike = "api" | "cli" | "static"
 
 export interface ModelCatalogResponse {
-  catalogs: Array<ProviderModelCatalog & { capabilities?: ModelCatalogCapabilitiesLike }>
+  catalogs: Array<
+    ProviderModelCatalog & {
+      capabilities?: ModelCatalogCapabilitiesLike
+      /**
+       * THIS provider's own source, not the response-level `source` below.
+       * The two can disagree — Anthropic can be `cli` while OpenAI is `api`
+       * in the same response — which is why `model-picker-chip.tsx`'s
+       * "subscription (dev)" badge reads this on the SELECTED provider's
+       * entry rather than the response-level field.
+       */
+      source?: ModelCatalogSourceLike
+    }
+  >
   default: SessionModelConfig
   /**
    * Which provider is THE default, per the server's own rule
@@ -59,9 +71,10 @@ export interface ModelCatalogResponse {
    */
   lastChosenModel?: SessionModelConfig | null
   /**
-   * Where the catalogs came from. `'cli'` means the `claude` command line
-   * tool on PATH's own sign-in answered, not an API key — see
-   * `ModelCatalogSourceLike`.
+   * The WEAKEST source among every served provider (see the server's own
+   * doc comment on `ModelCatalogSource`), kept for existing readers. A
+   * per-provider reader wants `catalogs[i].source` instead — see its doc
+   * comment above.
    */
   source?: ModelCatalogSourceLike
 }

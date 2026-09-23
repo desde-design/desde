@@ -264,6 +264,9 @@ describe("the resolver loops the descriptor table", () => {
     const resolved = await resolver.get()
     expect(resolved.source).toBe('static')
     expect(resolved.catalogs.map((c) => c.providerId)).toEqual(['anthropic', 'openai'])
+    // Per-provider, each one still reports its OWN source — Anthropic
+    // answered live even though the aggregate above reads 'static'.
+    expect(resolved.sourceByProvider).toEqual({ anthropic: 'api', openai: 'static' })
     // Held for the failure TTL, not the (much longer) success one.
     t += 500
     await resolver.get()

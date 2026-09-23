@@ -1231,20 +1231,29 @@ describe("the effort row is operable from the keyboard", () => {
 })
 
 /**
- * `source: "cli"` on the catalog response means the `claude` command line
- * tool on PATH's own sign-in answered it, not an API key (dev mode / the
+ * `source: "cli"` on a catalog ENTRY means the `claude` command line tool on
+ * PATH's own sign-in answered it, not an API key (dev mode / the
  * subscription sidecar) — see `resolveChatRuntimeKind` in
  * `editor-cli/src/server/chat-runtime-dispatch.ts`. The chip marks that so a
  * chat that stops working when that sign-in ends is not a surprise.
+ *
+ * The badge reads the SELECTED provider's own entry, not the response-level
+ * `source` (the weakest across every served provider) — the two can
+ * disagree when more than one provider is served, and only Anthropic has a
+ * subscription runtime at all.
  */
 describe("ModelPickerChip — subscription (dev) badge", () => {
-  it("shows the badge when the catalog's source is 'cli'", async () => {
+  it("shows the badge when anthropic is selected and its own entry's source is 'cli'", async () => {
     vi.resetModules()
     const { ModelPickerChip } = await import("./model-picker-chip")
     const { editorFetch } = await import("@/lib/editor-fetch")
     vi.mocked(editorFetch).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ ...CATALOG_RESPONSE, source: "cli" }),
+      json: async () => ({
+        ...CATALOG_RESPONSE,
+        catalogs: [{ ...CATALOG_RESPONSE.catalogs[0], source: "cli" }],
+        source: "cli",
+      }),
     } as unknown as Response)
     render(<ModelPickerChip value={null} onChange={() => {}} />)
     await waitFor(() => {
@@ -1254,25 +1263,86 @@ describe("ModelPickerChip — subscription (dev) badge", () => {
     })
   })
 
-  it("does not show the badge when the catalog's source is 'api'", async () => {
+  it("does not show the badge when anthropic's own entry's source is 'api'", async () => {
     vi.resetModules()
     const { ModelPickerChip } = await import("./model-picker-chip")
     const { editorFetch } = await import("@/lib/editor-fetch")
     vi.mocked(editorFetch).mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ ...CATALOG_RESPONSE, source: "api" }),
+      json: async () => ({
+        ...CATALOG_RESPONSE,
+        catalogs: [{ ...CATALOG_RESPONSE.catalogs[0], source: "api" }],
+        source: "api",
+      }),
     } as unknown as Response)
     render(<ModelPickerChip value={null} onChange={() => {}} />)
     await waitFor(() => screen.getByTestId("editor-model-chip"))
     expect(screen.queryByTestId("editor-model-subscription-badge")).not.toBeInTheDocument()
   })
 
-  it("does not show the badge when the catalog response omits source", async () => {
+  it("does not show the badge when the catalog entry omits source", async () => {
     // The default fetch mock at the top of this file answers with the plain
-    // CATALOG_RESPONSE — no `source` field at all.
+    // CATALOG_RESPONSE — no `source` field on the entry at all.
     vi.resetModules()
     const { ModelPickerChip } = await import("./model-picker-chip")
     render(<ModelPickerChip value={null} onChange={() => {}} />)
+    await waitFor(() => screen.getByTestId("editor-model-chip"))
+    expect(screen.queryByTestId("editor-model-subscription-badge")).not.toBeInTheDocument()
+  })
+
+  it("hides the badge for an openai selection even when the response-level source is 'cli'", async () => {
+    // Anthropic's own entry answered from the CLI sign-in; OpenAI's answered
+    // from its API key. The response-level `source` still reads 'cli' (the
+    // weakest across the response), but OpenAI has no subscription runtime
+    // at all, so a selection on it must never show the badge.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    const { editorFetch } = await import("@/lib/editor-fetch")
+    vi.mocked(editorFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        ...TWO_PROVIDER_CATALOG,
+        catalogs: [
+          { ...TWO_PROVIDER_CATALOG.catalogs[0], source: "cli" },
+          { ...TWO_PROVIDER_CATALOG.catalogs[1], source: "api" },
+        ],
+        source: "cli",
+      }),
+    } as unknown as Response)
+    render(
+      <ModelPickerChip
+        value={{ provider: "openai", model: "gpt-5.2" }}
+        onChange={() => {}}
+      />,
+    )
+    await waitFor(() => screen.getByTestId("editor-model-chip"))
+    expect(screen.queryByTestId("editor-model-subscription-badge")).not.toBeInTheDocument()
+  })
+
+  it("hides the badge for an anthropic selection whose own entry's source is 'static'", async () => {
+    // The aggregate response-level source ('cli', from some other served
+    // provider being weaker) must not leak into a provider whose OWN answer
+    // was static.
+    vi.resetModules()
+    const { ModelPickerChip } = await import("./model-picker-chip")
+    const { editorFetch } = await import("@/lib/editor-fetch")
+    vi.mocked(editorFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        ...TWO_PROVIDER_CATALOG,
+        catalogs: [
+          { ...TWO_PROVIDER_CATALOG.catalogs[0], source: "static" },
+          { ...TWO_PROVIDER_CATALOG.catalogs[1], source: "cli" },
+        ],
+        source: "cli",
+      }),
+    } as unknown as Response)
+    render(
+      <ModelPickerChip
+        value={{ provider: "anthropic", model: "claude-opus-4-8" }}
+        onChange={() => {}}
+      />,
+    )
     await waitFor(() => screen.getByTestId("editor-model-chip"))
     expect(screen.queryByTestId("editor-model-subscription-badge")).not.toBeInTheDocument()
   })
