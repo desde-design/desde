@@ -278,8 +278,20 @@ export function extractRetryAfterFromError(err: unknown): number | undefined {
   }
   if (raw === null || raw === undefined) return undefined
   const n = typeof raw === 'string' ? parseInt(raw, 10) : Number(raw)
-  if (!Number.isFinite(n) || n <= 0) return undefined
-  return Math.min(n, MAX_RETRY_AFTER_SECONDS)
+  if (Number.isFinite(n)) {
+    if (n <= 0) return undefined
+    return Math.min(n, MAX_RETRY_AFTER_SECONDS)
+  }
+  // RFC 9110 also allows an HTTP-date ("Wed, 23 Sep 2026 12:00:30 GMT"),
+  // which `parseInt` cannot read. It is the moment to retry at, so the wait
+  // is the whole seconds from now until then. A date already past means no
+  // wait was asked for.
+  if (typeof raw !== 'string') return undefined
+  const at = Date.parse(raw)
+  if (!Number.isFinite(at)) return undefined
+  const seconds = Math.ceil((at - Date.now()) / 1000)
+  if (seconds <= 0) return undefined
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS)
 }
 
 /**
