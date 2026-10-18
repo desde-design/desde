@@ -27,7 +27,7 @@
     "@types/nodemailer": "^8.0.1",
     "@types/supertest": "^6.0.2",
     "supertest": "^7.1.1",
-    "typescript": "^5",
+    "typescript": "^7",
     "vitest": "^4.0.18"
   }
 }
