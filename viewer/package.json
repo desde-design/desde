@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.1",
-    "@types/node": "^24",
+    "@types/node": "^26",
     "@types/nodemailer": "^8.0.1",
     "@types/supertest": "^6.0.2",
     "supertest": "^7.1.1",
